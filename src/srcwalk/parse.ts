@@ -127,9 +127,6 @@ export function synthesizeCandidateFromCommand(result: CommandResult, plan: Quer
     const arg = result.command.args[2] ?? "file";
     out.push({ target: arg.includes(":") ? arg : `${arg}:1`, source: "file-deps", commandLabel: result.command.label, kind: "file", score: 70, evidence: ["exact file deps"] });
   }
-  if (result.command.parseAs === "overview" && plan.queryKind === "overview" && !isEmptyResult(result)) {
-    out.push({ target: `${plan.scope}:1`, source: "overview", commandLabel: result.command.label, kind: "overview", score: 60, evidence: ["overview output returned"] });
-  }
   return out;
 }
 

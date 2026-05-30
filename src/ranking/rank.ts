@@ -7,6 +7,14 @@ import { candidateFile } from "../srcwalk/parse.js";
 const RRF_K = 60;
 const RRF_SCALE = 1500;
 
+function isTestTarget(target: string): boolean {
+  return /(?:^|[\\/_.-])(test|tests|spec|fixture)s?(?:[\\/_.-]|$)/i.test(target);
+}
+
+function isExplanationQuery(plan: QueryPlan): boolean {
+  return ["general", "definition", "related"].includes(plan.intent) && /\b(how|work|works|implementation|implemented|calculate|calculation|manage|flow)\b/i.test(plan.query);
+}
+
 export function cloneCandidate(c: Candidate): Candidate {
   return { ...c, evidence: [...c.evidence] };
 }
@@ -39,8 +47,13 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
       }
     }
     if (kws.some((kw) => target.includes(kw) || (cand.symbol ?? "").toLowerCase().includes(kw))) cand.score += 12;
-    if (plan.intent === "test" && /test|tests|spec|fixture/i.test(target)) cand.score += 20;
-    if (plan.intent !== "test" && /test|tests|spec|fixture/i.test(target)) cand.score -= 8;
+    const testTarget = isTestTarget(target);
+    if (plan.intent === "test" && testTarget) cand.score += 20;
+    if (plan.intent !== "test" && testTarget) {
+      const penalty = isExplanationQuery(plan) ? 36 : 8;
+      cand.score -= penalty;
+      cand.evidence.push(`penalty: non-test query matched test-like path (-${penalty})`);
+    }
     if (["general", "definition"].includes(plan.intent) && ["rank", "ranking", "score", "scoring"].some((kw) => kws.includes(kw)) && /rank|score|search\/rank/.test(target)) {
       cand.score += 20;
       cand.evidence.push("boost: ranking/scoring path");
@@ -101,6 +114,9 @@ export function bm25HasStrongCluster(plan: QueryPlan, candidates: Candidate[]): 
   const gap = top[0]!.score - (top[1]?.score ?? 0);
   const pathText = top.map((c) => c.target.toLowerCase()).join(" ");
   const kwHits = domainKeywords(plan).filter((kw) => pathText.includes(kw.toLowerCase())).length;
+  if (plan.intent !== "test" && isExplanationQuery(plan) && isTestTarget(topFile)) {
+    return [false, `BM25 cluster ignored: explanation query top cluster is test-like path ${topFile}`];
+  }
   if (sameFileCount >= 2 && kwHits >= 1) return [true, `BM25 cluster: ${sameFileCount}/${top.length} top candidates in ${topFile} with keyword path hit`];
   if (sameDirCount >= 3 && gap >= 2 && kwHits >= 1) return [true, `BM25 module cluster: ${sameDirCount}/${top.length} top candidates near ${path.dirname(topFile)}`];
   return [false, "BM25 cluster not strong"];

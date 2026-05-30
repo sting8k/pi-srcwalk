@@ -84,6 +84,14 @@ export async function executeSearch(options: ExecuteSearchOptions): Promise<Sear
     structuralCandidates.push(...synthesizeCandidateFromCommand(result, plan));
   }
 
+  if (plan.queryKind === "overview") {
+    const confidence = confidenceReport(plan, []);
+    const overviewExpansion = commandResults.find((r) => r.command.parseAs === "overview" && r.code === 0 && r.output.trim());
+    if (overviewExpansion) expansions.push(overviewExpansion);
+    else if (commandResults.length) expansions.push(commandResults.find((r) => r.code === 0 && r.output.trim()) ?? commandResults.at(-1)!);
+    return { plan, commandResults, candidates: [], expansions, notes, confidence, cache };
+  }
+
   const rankLists: Array<[string, Candidate[], number]> = [];
   if (bm25Candidates.length) rankLists.push(["bm25-prf", dedupeRanked(scoreCandidates(bm25Candidates.map(cloneCandidate), plan)), 1.0]);
   if (structuralCandidates.length) rankLists.push(["srcwalk", dedupeRanked(scoreCandidates(structuralCandidates.map(cloneCandidate), plan)), 1.25]);
