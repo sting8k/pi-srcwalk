@@ -1,0 +1,941 @@
+#!/usr/bin/env bash
+# harness — thin CLI for the durable harness layer.
+# Wraps SQLite so agents and humans can record and query operational data
+# without editing markdown tables by hand.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DB_PATH="${HARNESS_DB:-$REPO_ROOT/harness.db}"
+SCHEMA_DIR="$REPO_ROOT/scripts/schema"
+INSTALLED_RUST_CLI="$REPO_ROOT/scripts/bin/harness-cli"
+DEV_RUST_CLI="$REPO_ROOT/target/debug/harness-cli"
+RUST_CLI="${HARNESS_RUST_CLI:-}"
+
+if [ -z "$RUST_CLI" ]; then
+  if [ -x "$INSTALLED_RUST_CLI" ]; then
+    RUST_CLI="$INSTALLED_RUST_CLI"
+  else
+    RUST_CLI="$DEV_RUST_CLI"
+  fi
+fi
+
+rust_cli_supports() {
+  case "${1:-}:${2:-}" in
+    init:*|migrate:*|import:brownfield|intake:*|story:add|story:update|decision:add|decision:verify|backlog:add|backlog:close|trace:*|query:matrix|query:backlog|query:decisions|query:intakes|query:traces|query:friction|query:stats|query:sql)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [ "${HARNESS_DISABLE_RUST_CLI:-0}" != "1" ] &&
+   [ -x "$RUST_CLI" ] &&
+   rust_cli_supports "${1:-}" "${2:-}"; then
+  HARNESS_REPO_ROOT="$REPO_ROOT" exec "$RUST_CLI" "$@"
+fi
+
+# ── helpers ────────────────────────────────────────────────────────
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+need_db() {
+  [ -f "$DB_PATH" ] || die "Database not found at $DB_PATH. Run: harness init"
+}
+
+sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+sql_literal() { printf "'%s'" "$(sql_escape "$1")"; }
+
+sql_or_null() {
+  [ -n "$1" ] && sql_literal "$1" || printf 'NULL'
+}
+
+sql() { sqlite3 -batch -cmd "PRAGMA foreign_keys = ON;" "$DB_PATH" "$@"; }
+
+sql_pretty() { sqlite3 -header -column -cmd "PRAGMA foreign_keys = ON;" "$DB_PATH" "$@"; }
+
+sql_file() { sqlite3 -batch -cmd "PRAGMA foreign_keys = ON;" "$DB_PATH" < "$1" >/dev/null; }
+
+trim() {
+  local input="$1"
+  printf '%s' "$input" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+normalize_token() {
+  local input="$1"
+  printf '%s' "$input" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'
+}
+
+normalize_input_type() {
+  local token
+  token="$(normalize_token "$1")"
+  case "$token" in
+    new_spec|spec_slice|change_request|new_initiative|harness_improvement)
+      printf '%s' "$token"
+      ;;
+    maintenance|maintenance_request)
+      printf 'maintenance'
+      ;;
+    *)
+      die "unknown intake type '$1'. Use: new spec, spec slice, change request, new initiative, maintenance request, or harness improvement"
+      ;;
+  esac
+}
+
+normalize_lane() {
+  local token
+  token="$(normalize_token "$1")"
+  case "$token" in
+    tiny|normal|high_risk)
+      printf '%s' "$token"
+      ;;
+    *)
+      die "unknown lane '$1'. Use: tiny, normal, or high-risk"
+      ;;
+  esac
+}
+
+normalize_risk() {
+  [ -z "$1" ] && return
+  normalize_lane "$1"
+}
+
+require_integer() {
+  local label="$1" value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be an integer"
+}
+
+require_bool() {
+  local label="$1" value="$2"
+  [[ "$value" =~ ^[01]$ ]] || die "$label must be 0 or 1"
+}
+
+json_array() {
+  # Turn a comma-separated string into a JSON array.
+  local input="$1"
+  [ -z "$input" ] && printf 'null' && return
+  printf '[%s]' "$(echo "$input" | sed 's/[[:space:]]*,[[:space:]]*/","/g; s/^/"/; s/$/"/')"
+}
+
+json_sql_value() {
+  local input="$1"
+  [ -z "$input" ] && printf 'NULL' && return
+  printf "'%s'" "$(sql_escape "$(json_array "$input")")"
+}
+
+proof_from_cell() {
+  local token
+  token="$(normalize_token "$1")"
+  case "$token" in
+    ""|no|no_*|none|n_a|na|planned|pending|pending_*|blocked|blocked_*|*pending*|*blocked*|*not_attempted*|*not_operator_reviewed*)
+      printf '0'
+      ;;
+    *)
+      printf '1'
+      ;;
+  esac
+}
+
+# ── init ───────────────────────────────────────────────────────────
+cmd_init() {
+  if [ -f "$DB_PATH" ]; then
+    info "Database already exists at $DB_PATH"
+    local current
+    current=$(sql "SELECT COALESCE(MAX(version),0) FROM schema_version;" 2>/dev/null || echo 0)
+    if [ "$current" -eq 0 ]; then
+      info "No schema version found. Applying schema version 1."
+      sql_file "$SCHEMA_DIR/001-init.sql"
+      info "Schema version 1 applied."
+      return 0
+    fi
+    info "Current schema version: $current"
+    return 0
+  fi
+  info "Creating harness database at $DB_PATH"
+  sql_file "$SCHEMA_DIR/001-init.sql"
+  info "Schema version 1 applied."
+}
+
+# ── migrate ────────────────────────────────────────────────────────
+cmd_migrate() {
+  need_db
+  local current
+  current=$(sql "SELECT COALESCE(MAX(version),0) FROM schema_version;" 2>/dev/null || echo 0)
+  info "Current schema version: $current"
+
+  local applied=0
+  for f in "$SCHEMA_DIR"/*.sql; do
+    [ -f "$f" ] || continue
+    local v
+    v=$(basename "$f" | sed 's/-.*//' | sed 's/^0*//' )
+    [ -z "$v" ] && continue
+    if [ "$v" -gt "$current" ]; then
+      info "Applying migration $v from $(basename "$f")..."
+      sql_file "$f"
+      applied=$((applied + 1))
+    fi
+  done
+
+  if [ "$applied" -eq 0 ]; then
+    info "Already up to date."
+  else
+    info "Applied $applied migration(s)."
+  fi
+}
+
+# ── import ─────────────────────────────────────────────────────────
+cmd_import() {
+  need_db
+  local source="${1:-}"; shift 1 2>/dev/null || true
+
+  case "$source" in
+    brownfield)
+      import_brownfield "$@"
+      ;;
+    *)
+      die "import: expected 'brownfield'. Usage: harness import brownfield"
+      ;;
+  esac
+}
+
+import_brownfield() {
+  local matrix_path="$REPO_ROOT/docs/TEST_MATRIX.md"
+  local decisions_dir="$REPO_ROOT/docs/decisions"
+  local backlog_path="$REPO_ROOT/docs/HARNESS_BACKLOG.md"
+  [ -f "$matrix_path" ] || die "brownfield import: missing $matrix_path"
+  [ -d "$decisions_dir" ] || die "brownfield import: missing $decisions_dir"
+
+  local story_count=0 decision_count=0 backlog_count=0
+
+  local matrix_header_seen=0
+  local story_col=0 contract_col=0 unit_col=0 integration_col=0 e2e_col=0 platform_col=0 status_col=0 evidence_col=0
+  while IFS= read -r line; do
+    [[ "$line" == \|* ]] || continue
+    IFS='|' read -r -a fields <<< "$line"
+    [ "${#fields[@]}" -gt 2 ] || continue
+
+    if [ "$matrix_header_seen" -eq 0 ]; then
+      local idx header
+      local header_limit="${#fields[@]}"
+      if [ "$header_limit" -gt 0 ] && [ -z "$(trim "${fields[$((header_limit - 1))]:-}")" ]; then
+        header_limit=$((header_limit - 1))
+      fi
+      for ((idx = 1; idx < header_limit; idx++)); do
+        header="$(normalize_token "$(trim "${fields[$idx]:-}")")"
+        case "$header" in
+          story)       story_col=$idx ;;
+          contract)    contract_col=$idx ;;
+          unit)        unit_col=$idx ;;
+          integration) integration_col=$idx ;;
+          e2e)         e2e_col=$idx ;;
+          platform)    platform_col=$idx ;;
+          status)      status_col=$idx ;;
+          evidence)    evidence_col=$idx ;;
+        esac
+      done
+
+      if [ "$story_col" -gt 0 ] && [ "$status_col" -gt 0 ]; then
+        matrix_header_seen=1
+      fi
+      continue
+    fi
+
+    local id title unit integration e2e platform status evidence token
+    id="$(trim "${fields[$story_col]:-}")"
+    token="$(normalize_token "$id")"
+    case "$token" in
+      ""|story|tbd|todo|example|examples)
+        continue
+        ;;
+    esac
+    [[ "$id" =~ ^-+$ ]] && continue
+
+    title="$id"
+    if [ "$contract_col" -gt 0 ]; then
+      title="$(trim "${fields[$contract_col]:-}")"
+    fi
+    [ -n "$title" ] || title="$id"
+
+    unit=0
+    integration=0
+    e2e=0
+    platform=0
+    [ "$unit_col" -gt 0 ]        && unit="$(proof_from_cell "${fields[$unit_col]:-}")"
+    [ "$integration_col" -gt 0 ] && integration="$(proof_from_cell "${fields[$integration_col]:-}")"
+    [ "$e2e_col" -gt 0 ]         && e2e="$(proof_from_cell "${fields[$e2e_col]:-}")"
+    [ "$platform_col" -gt 0 ]    && platform="$(proof_from_cell "${fields[$platform_col]:-}")"
+
+    status="$(normalize_token "$(trim "${fields[$status_col]:-}")")"
+    case "$status" in
+      planned|in_progress|implemented|changed|retired) ;;
+      *) status="planned" ;;
+    esac
+
+    evidence=""
+    if [ "$evidence_col" -gt 0 ]; then
+      local evidence_limit="${#fields[@]}"
+      if [ "$evidence_limit" -gt 0 ] && [ -z "$(trim "${fields[$((evidence_limit - 1))]:-}")" ]; then
+        evidence_limit=$((evidence_limit - 1))
+      fi
+      for ((idx = evidence_col; idx < evidence_limit; idx++)); do
+        if [ -n "$evidence" ]; then
+          evidence="$evidence | ${fields[$idx]}"
+        else
+          evidence="${fields[$idx]}"
+        fi
+      done
+      evidence="$(trim "$evidence")"
+    fi
+
+    sql "INSERT INTO story (
+           id, title, risk_lane, contract_doc, status,
+           unit_proof, integration_proof, e2e_proof, platform_proof,
+           evidence, notes
+         ) VALUES (
+           $(sql_literal "$id"),
+           $(sql_literal "$title"),
+           'high_risk',
+           $(sql_or_null "$title"),
+           $(sql_literal "$status"),
+           $unit,
+           $integration,
+           $e2e,
+           $platform,
+           $(sql_or_null "$evidence"),
+           'Imported from docs/TEST_MATRIX.md by harness import brownfield.'
+         )
+         ON CONFLICT(id) DO UPDATE SET
+           title=excluded.title,
+           contract_doc=excluded.contract_doc,
+           status=excluded.status,
+           unit_proof=excluded.unit_proof,
+           integration_proof=excluded.integration_proof,
+           e2e_proof=excluded.e2e_proof,
+           platform_proof=excluded.platform_proof,
+           evidence=excluded.evidence,
+           notes=excluded.notes;"
+    story_count=$((story_count + 1))
+  done < "$matrix_path"
+
+  local decision_file
+  while IFS= read -r decision_file; do
+    local stem title status
+    stem="$(basename "$decision_file" .md)"
+    title="$(sed -n '1s/^# //p' "$decision_file")"
+    title="${title:-$stem}"
+    status="$(awk '
+      /^## Status[[:space:]]*$/ { found=1; next }
+      found && NF { print; exit }
+    ' "$decision_file")"
+    status="$(normalize_token "$status")"
+    case "$status" in
+      proposed|accepted|superseded|rejected) ;;
+      superseded_*) status="superseded" ;;
+      *) status="accepted" ;;
+    esac
+
+    sql "INSERT INTO decision (id, title, status, doc_path, notes)
+         VALUES (
+           $(sql_literal "$stem"),
+           $(sql_literal "$title"),
+           $(sql_literal "$status"),
+           $(sql_literal "docs/decisions/$(basename "$decision_file")"),
+           'Imported from docs/decisions by harness import brownfield.'
+         )
+         ON CONFLICT(id) DO UPDATE SET
+           title=excluded.title,
+           status=excluded.status,
+           doc_path=excluded.doc_path,
+           notes=excluded.notes;"
+    decision_count=$((decision_count + 1))
+  done < <(find "$decisions_dir" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]-*.md' | sort)
+
+  if [ -f "$backlog_path" ]; then
+    local title discovered pain suggestion risk status
+    title=""
+    discovered=""
+    pain=""
+    suggestion=""
+    risk=""
+    status="proposed"
+
+    title="$(awk '/^## Items$/ { items=1; next } items && /^### Title$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    discovered="$(awk '/^## Items$/ { items=1; next } items && /^### Discovered While$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    pain="$(awk '/^## Items$/ { items=1; next } items && /^### Current Pain$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    suggestion="$(awk '/^## Items$/ { items=1; next } items && /^### Suggested Improvement$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    risk="$(awk '/^## Items$/ { items=1; next } items && /^### Risk$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    status="$(awk '/^## Items$/ { items=1; next } items && /^### Status$/ { want=1; next } want && NF { print; exit }' "$backlog_path")"
+    risk="$(normalize_risk "$risk")"
+    status="$(normalize_token "$status")"
+    case "$status" in
+      proposed|accepted|implemented|rejected) ;;
+      *) status="proposed" ;;
+    esac
+
+    if [ -n "$title" ] && [ "$title" != "Short name." ]; then
+      sql "INSERT INTO backlog (
+             title, discovered_while, current_pain, suggested_improvement,
+             risk, status, notes
+           )
+           SELECT
+             $(sql_literal "$title"),
+             $(sql_or_null "$discovered"),
+             $(sql_or_null "$pain"),
+             $(sql_or_null "$suggestion"),
+             $(sql_or_null "$risk"),
+             $(sql_literal "$status"),
+             'Imported from docs/HARNESS_BACKLOG.md by harness import brownfield.'
+           WHERE NOT EXISTS (
+             SELECT 1 FROM backlog WHERE title=$(sql_literal "$title")
+           );"
+      backlog_count=1
+    fi
+  fi
+
+  info "Brownfield import complete."
+  info "Stories imported or updated: $story_count"
+  info "Decisions imported or updated: $decision_count"
+  info "Backlog items discovered: $backlog_count"
+}
+
+# ── intake ─────────────────────────────────────────────────────────
+cmd_intake() {
+  need_db
+  local input_type="" summary="" risk_lane="" risk_flags="" affected_docs="" story_id="" notes=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type)         input_type="$2";    shift 2 ;;
+      --summary)      summary="$2";       shift 2 ;;
+      --lane)         risk_lane="$2";     shift 2 ;;
+      --flags)        risk_flags="$2";    shift 2 ;;
+      --docs)         affected_docs="$2"; shift 2 ;;
+      --story)        story_id="$2";      shift 2 ;;
+      --notes)        notes="$2";         shift 2 ;;
+      *) die "intake: unknown flag $1" ;;
+    esac
+  done
+
+  [ -n "$input_type" ] || die "intake: --type is required"
+  [ -n "$summary" ]    || die "intake: --summary is required"
+  [ -n "$risk_lane" ]  || die "intake: --lane is required"
+
+  input_type="$(normalize_input_type "$input_type")"
+  risk_lane="$(normalize_lane "$risk_lane")"
+
+  local flags_json
+  flags_json=$(json_array "$risk_flags")
+  local docs_json
+  docs_json=$(json_array "$affected_docs")
+
+  local last_id
+  last_id=$(sql "INSERT INTO intake (input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes)
+       VALUES ($(sql_literal "$input_type"), $(sql_literal "$summary"), $(sql_literal "$risk_lane"),
+               $(sql_literal "$flags_json"), $(sql_literal "$docs_json"),
+               $(sql_or_null "$story_id"),
+               $(sql_or_null "$notes"));
+       SELECT last_insert_rowid();")
+  info "Intake #$last_id recorded."
+}
+
+# ── story ──────────────────────────────────────────────────────────
+cmd_story() {
+  need_db
+  local action="${1:-}"; shift 2>/dev/null || true
+
+  case "$action" in
+    add)
+      local id="" title="" risk_lane="" contract_doc="" notes=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --id)       id="$2";           shift 2 ;;
+          --title)    title="$2";        shift 2 ;;
+          --lane)     risk_lane="$2";    shift 2 ;;
+          --contract) contract_doc="$2"; shift 2 ;;
+          --notes)    notes="$2";        shift 2 ;;
+          *) die "story add: unknown flag $1" ;;
+        esac
+      done
+      [ -n "$id" ]        || die "story add: --id is required"
+      [ -n "$title" ]     || die "story add: --title is required"
+      [ -n "$risk_lane" ] || die "story add: --lane is required"
+
+      risk_lane="$(normalize_lane "$risk_lane")"
+
+      sql "INSERT INTO story (id, title, risk_lane, contract_doc, notes)
+           VALUES ($(sql_literal "$id"), $(sql_literal "$title"), $(sql_literal "$risk_lane"),
+                   $(sql_or_null "$contract_doc"),
+                   $(sql_or_null "$notes"));"
+      info "Story $id added."
+      ;;
+
+    update)
+      local id="" status="" evidence="" unit="" integration="" e2e="" platform=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --id)          id="$2";          shift 2 ;;
+          --status)      status="$2";      shift 2 ;;
+          --evidence)    evidence="$2";    shift 2 ;;
+          --unit)        unit="$2";        shift 2 ;;
+          --integration) integration="$2"; shift 2 ;;
+          --e2e)         e2e="$2";         shift 2 ;;
+          --platform)    platform="$2";    shift 2 ;;
+          *) die "story update: unknown flag $1" ;;
+        esac
+      done
+      [ -n "$id" ] || die "story update: --id is required"
+      [ -n "$unit" ]        && require_bool "story update: --unit" "$unit"
+      [ -n "$integration" ] && require_bool "story update: --integration" "$integration"
+      [ -n "$e2e" ]         && require_bool "story update: --e2e" "$e2e"
+      [ -n "$platform" ]    && require_bool "story update: --platform" "$platform"
+
+      local sets=""
+      [ -n "$status" ]      && sets="$sets status=$(sql_literal "$status"),"
+      [ -n "$evidence" ]    && sets="$sets evidence=$(sql_literal "$evidence"),"
+      [ -n "$unit" ]        && sets="$sets unit_proof=$unit,"
+      [ -n "$integration" ] && sets="$sets integration_proof=$integration,"
+      [ -n "$e2e" ]         && sets="$sets e2e_proof=$e2e,"
+      [ -n "$platform" ]    && sets="$sets platform_proof=$platform,"
+      [ -z "$sets" ] && die "story update: nothing to update"
+      sets="${sets%,}"
+
+      local changed
+      changed=$(sql "UPDATE story SET $sets WHERE id=$(sql_literal "$id"); SELECT changes();")
+      [ "$changed" -gt 0 ] || die "story update: story '$id' not found"
+      info "Story $id updated."
+      ;;
+
+    *)
+      die "story: expected 'add' or 'update'. Usage: harness story add|update [flags]"
+      ;;
+  esac
+}
+
+# ── decision ───────────────────────────────────────────────────────
+cmd_decision() {
+  need_db
+  local action="${1:-}"; shift 2>/dev/null || true
+
+  case "$action" in
+    add)
+      local id="" title="" status="accepted" doc_path="" verify_command="" predicted_impact="" notes=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --id)        id="$2";               shift 2 ;;
+          --title)     title="$2";            shift 2 ;;
+          --status)    status="$2";           shift 2 ;;
+          --doc)       doc_path="$2";         shift 2 ;;
+          --verify)    verify_command="$2";   shift 2 ;;
+          --predicted) predicted_impact="$2"; shift 2 ;;
+          --notes)     notes="$2";            shift 2 ;;
+          *) die "decision add: unknown flag $1" ;;
+        esac
+      done
+      [ -n "$id" ]    || die "decision add: --id is required"
+      [ -n "$title" ] || die "decision add: --title is required"
+
+      sql "INSERT INTO decision (id, title, status, doc_path, verify_command, predicted_impact, notes)
+           VALUES ($(sql_literal "$id"), $(sql_literal "$title"), $(sql_literal "$status"),
+                   $(sql_or_null "$doc_path"),
+                   $(sql_or_null "$verify_command"),
+                   $(sql_or_null "$predicted_impact"),
+                   $(sql_or_null "$notes"));"
+      info "Decision $id added."
+      ;;
+
+    verify)
+      local id="${1:-}"
+      [ -n "$id" ] || die "decision verify: provide a decision id"
+      local cmd
+      cmd=$(sql "SELECT verify_command FROM decision WHERE id=$(sql_literal "$id");")
+      [ -n "$cmd" ] || die "decision $id has no verify_command"
+      info "Running: $cmd"
+      local result
+      if eval "$cmd"; then
+        result="pass"
+      else
+        result="fail"
+      fi
+      sql "UPDATE decision SET last_verified_at=datetime('now'), last_verified_result=$(sql_literal "$result") WHERE id=$(sql_literal "$id");"
+      info "Decision $id verification: $result"
+      ;;
+
+    *)
+      die "decision: expected 'add' or 'verify'. Usage: harness decision add|verify [flags]"
+      ;;
+  esac
+}
+
+# ── backlog ────────────────────────────────────────────────────────
+cmd_backlog() {
+  need_db
+  local action="${1:-}"; shift 2>/dev/null || true
+
+  case "$action" in
+    add)
+      local title="" discovered_while="" current_pain="" suggestion="" risk="" predicted="" notes=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --title)      title="$2";            shift 2 ;;
+          --while)      discovered_while="$2"; shift 2 ;;
+          --pain)       current_pain="$2";     shift 2 ;;
+          --suggestion) suggestion="$2";       shift 2 ;;
+          --risk)       risk="$2";             shift 2 ;;
+          --predicted)  predicted="$2";        shift 2 ;;
+          --notes)      notes="$2";            shift 2 ;;
+          *) die "backlog add: unknown flag $1" ;;
+        esac
+      done
+      [ -n "$title" ] || die "backlog add: --title is required"
+      [ -n "$risk" ] && risk="$(normalize_risk "$risk")"
+
+      local last_id
+      last_id=$(sql "INSERT INTO backlog (title, discovered_while, current_pain, suggested_improvement, risk, predicted_impact, notes)
+           VALUES ($(sql_literal "$title"),
+                   $(sql_or_null "$discovered_while"),
+                   $(sql_or_null "$current_pain"),
+                   $(sql_or_null "$suggestion"),
+                   $(sql_or_null "$risk"),
+                   $(sql_or_null "$predicted"),
+                   $(sql_or_null "$notes"));
+           SELECT last_insert_rowid();")
+      info "Backlog #$last_id added."
+      ;;
+
+    close)
+      local id="" actual_outcome=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --id)      id="$2";             shift 2 ;;
+          --outcome) actual_outcome="$2"; shift 2 ;;
+          --status)  local s="$2";        shift 2 ;;
+          *) die "backlog close: unknown flag $1" ;;
+        esac
+      done
+      [ -n "$id" ] || die "backlog close: --id is required"
+      require_integer "backlog close: --id" "$id"
+      local new_status="${s:-implemented}"
+
+      local changed
+      changed=$(sql "UPDATE backlog
+           SET status=$(sql_literal "$new_status"),
+               actual_outcome=$(sql_or_null "$actual_outcome"),
+               implemented_at=datetime('now')
+           WHERE id=$id;
+           SELECT changes();")
+      [ "$changed" -gt 0 ] || die "backlog close: backlog item '$id' not found"
+      info "Backlog #$id closed as $new_status."
+      ;;
+
+    *)
+      die "backlog: expected 'add' or 'close'. Usage: harness backlog add|close [flags]"
+      ;;
+  esac
+}
+
+# ── trace ──────────────────────────────────────────────────────────
+cmd_trace() {
+  need_db
+  local task_summary="" intake_id="" story_id="" agent="" outcome="" duration="" tokens="" friction="" notes=""
+  local actions="" files_read="" files_changed="" decisions="" errors=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --summary)   task_summary="$2"; shift 2 ;;
+      --intake)    intake_id="$2";    shift 2 ;;
+      --story)     story_id="$2";     shift 2 ;;
+      --agent)     agent="$2";        shift 2 ;;
+      --outcome)   outcome="$2";      shift 2 ;;
+      --duration)  duration="$2";     shift 2 ;;
+      --tokens)    tokens="$2";       shift 2 ;;
+      --friction)  friction="$2";     shift 2 ;;
+      --actions)   actions="$2";      shift 2 ;;
+      --read)      files_read="$2";   shift 2 ;;
+      --changed)   files_changed="$2";shift 2 ;;
+      --decisions) decisions="$2";    shift 2 ;;
+      --errors)    errors="$2";       shift 2 ;;
+      --notes)     notes="$2";        shift 2 ;;
+      *) die "trace: unknown flag $1" ;;
+    esac
+  done
+
+  [ -n "$task_summary" ] || die "trace: --summary is required"
+  [ -n "$intake_id" ] && require_integer "trace: --intake" "$intake_id"
+  [ -n "$duration" ]  && require_integer "trace: --duration" "$duration"
+  [ -n "$tokens" ]    && require_integer "trace: --tokens" "$tokens"
+
+  local last_id
+  last_id=$(sql "INSERT INTO trace (
+         task_summary, intake_id, story_id, agent,
+         actions_taken, files_read, files_changed, decisions_made, errors,
+         outcome, duration_seconds, token_estimate, harness_friction, notes
+       ) VALUES (
+         $(sql_literal "$task_summary"),
+         $([ -n "$intake_id" ] && echo "$intake_id" || echo "NULL"),
+         $(sql_or_null "$story_id"),
+         $(sql_or_null "$agent"),
+         $(json_sql_value "$actions"),
+         $(json_sql_value "$files_read"),
+         $(json_sql_value "$files_changed"),
+         $(json_sql_value "$decisions"),
+         $(json_sql_value "$errors"),
+         $(sql_or_null "$outcome"),
+         $([ -n "$duration" ] && echo "$duration" || echo "NULL"),
+         $([ -n "$tokens" ] && echo "$tokens" || echo "NULL"),
+         $(sql_or_null "$friction"),
+         $(sql_or_null "$notes")
+       );
+       SELECT last_insert_rowid();")
+  info "Trace #$last_id recorded."
+}
+
+# ── query ──────────────────────────────────────────────────────────
+cmd_query() {
+  local view="${1:-help}"
+
+  case "$view" in
+    help|--help|-h)
+      show_query_help
+      return 0
+      ;;
+  esac
+
+  need_db
+
+  case "$view" in
+    matrix)
+      sql_pretty "SELECT id, title, status,
+                         CASE unit_proof WHEN 1 THEN 'yes' ELSE 'no' END AS unit,
+                         CASE integration_proof WHEN 1 THEN 'yes' ELSE 'no' END AS integ,
+                         CASE e2e_proof WHEN 1 THEN 'yes' ELSE 'no' END AS e2e,
+                         CASE platform_proof WHEN 1 THEN 'yes' ELSE 'no' END AS plat,
+                         evidence
+                  FROM story ORDER BY id;"
+      ;;
+    backlog)
+      sql_pretty "SELECT id, title, status, risk, predicted_impact, actual_outcome
+                  FROM backlog ORDER BY status, id;"
+      ;;
+    decisions)
+      sql_pretty "SELECT id, title, status, last_verified_at, last_verified_result
+                  FROM decision ORDER BY id;"
+      ;;
+    intakes)
+      sql_pretty "SELECT id, created_at, input_type, risk_lane, summary
+                  FROM intake ORDER BY id DESC LIMIT 20;"
+      ;;
+    traces)
+      sql_pretty "SELECT id, created_at, outcome, task_summary, harness_friction
+                  FROM trace ORDER BY id DESC LIMIT 20;"
+      ;;
+    friction)
+      sql_pretty "SELECT id, created_at, task_summary, harness_friction
+                  FROM trace WHERE harness_friction IS NOT NULL
+                  ORDER BY id DESC;"
+      ;;
+    stats)
+      info "=== Harness Stats ==="
+      sql_pretty "SELECT
+                    (SELECT COUNT(*) FROM intake) AS intakes,
+                    (SELECT COUNT(*) FROM story) AS stories,
+                    (SELECT COUNT(*) FROM decision) AS decisions,
+                    (SELECT COUNT(*) FROM backlog) AS backlog_items,
+                    (SELECT COUNT(*) FROM trace) AS traces;"
+      ;;
+    sql)
+      shift
+      sql_pretty "$@"
+      ;;
+    *) die "query: unknown view $view. Run 'harness query help'." ;;
+  esac
+}
+
+show_query_help() {
+  cat <<'EOF'
+Usage: harness query <view>
+
+Views:
+  matrix      Test matrix (story validation status)
+  backlog     Harness improvement proposals
+  decisions   Decision records and verification status
+  intakes     Recent intake classifications
+  traces      Recent agent execution traces
+  friction    Traces where harness friction was reported
+  stats       Summary counts
+  sql <query> Run arbitrary SQL
+EOF
+}
+
+# ── main ───────────────────────────────────────────────────────────
+show_command_help() {
+  case "$1" in
+    init)
+      cat <<'EOF'
+Usage: harness init
+
+Create the harness database if it does not already exist.
+EOF
+      ;;
+    migrate)
+      cat <<'EOF'
+Usage: harness migrate
+
+Apply schema migrations that have not been recorded in schema_version.
+EOF
+      ;;
+    import)
+      cat <<'EOF'
+Usage: harness import brownfield
+
+Seed or refresh the durable database from existing brownfield markdown:
+  - docs/TEST_MATRIX.md -> story rows using the matrix header columns
+  - docs/decisions/*.md -> decision rows
+  - docs/HARNESS_BACKLOG.md -> backlog proposal rows
+
+Story IDs are project-specific; no prefix such as CA- or US- is assumed. The
+import is idempotent for stories and decisions and skips duplicate backlog
+titles.
+EOF
+      ;;
+    intake)
+      cat <<'EOF'
+Usage: harness intake --type <type> --summary <text> --lane <lane> [flags]
+
+Flags:
+  --type <type>      new spec, spec slice, change request, new initiative,
+                     maintenance request, or harness improvement
+  --summary <text>   Short work summary
+  --lane <lane>      tiny, normal, or high-risk
+  --flags <csv>      Risk flags
+  --docs <csv>       Affected doc paths
+  --story <id>       Linked story id
+  --notes <text>     Additional notes
+EOF
+      ;;
+    story)
+      cat <<'EOF'
+Usage:
+  harness story add --id <id> --title <text> --lane <lane> [flags]
+  harness story update --id <id> [flags]
+
+Add flags:
+  --contract <path>  Related product contract
+  --notes <text>     Additional notes
+
+Update flags:
+  --status <status>  planned, in_progress, implemented, changed, or retired
+  --evidence <text>  Validation evidence
+  --unit <0|1>       Unit proof status
+  --integration <0|1>
+  --e2e <0|1>
+  --platform <0|1>
+EOF
+      ;;
+    decision)
+      cat <<'EOF'
+Usage:
+  harness decision add --id <id> --title <text> [flags]
+  harness decision verify <id>
+
+Add flags:
+  --status <status>      proposed, accepted, superseded, or rejected
+  --doc <path>           Decision document path
+  --verify <command>     Verification command
+  --predicted <text>     Predicted impact
+  --notes <text>         Additional notes
+EOF
+      ;;
+    backlog)
+      cat <<'EOF'
+Usage:
+  harness backlog add --title <text> [flags]
+  harness backlog close --id <id> [flags]
+
+Add flags:
+  --while <text>       Discovery context
+  --pain <text>        Current pain
+  --suggestion <text>  Suggested improvement
+  --risk <lane>        tiny, normal, or high-risk
+  --predicted <text>   Predicted impact
+  --notes <text>       Additional notes
+
+Close flags:
+  --status <status>    implemented, accepted, proposed, or rejected
+  --outcome <text>     Actual outcome
+EOF
+      ;;
+    trace)
+      cat <<'EOF'
+Usage: harness trace --summary <text> [flags]
+
+Flags:
+  --summary <text>    Task summary
+  --intake <id>       Linked intake id
+  --story <id>        Linked story id
+  --agent <name>      Agent name
+  --outcome <result>  completed, blocked, partial, or failed
+  --actions <csv>     Actions taken
+  --read <csv>        Files read
+  --changed <csv>     Files changed
+  --decisions <csv>   Decisions made
+  --errors <csv>      Errors encountered
+  --duration <sec>    Duration in seconds
+  --tokens <count>    Token estimate
+  --friction <text>   Harness friction
+  --notes <text>      Additional notes
+EOF
+      ;;
+    query)
+      show_query_help
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  show_command_help "$cmd" || die "Unknown command: $cmd. Run 'harness help'."
+  exit 0
+fi
+
+case "$cmd" in
+  init)     cmd_init "$@" ;;
+  migrate)  cmd_migrate "$@" ;;
+  import)   cmd_import "$@" ;;
+  intake)   cmd_intake "$@" ;;
+  story)    cmd_story "$@" ;;
+  decision) cmd_decision "$@" ;;
+  backlog)  cmd_backlog "$@" ;;
+  trace)    cmd_trace "$@" ;;
+  query)    cmd_query "$@" ;;
+  help|--help|-h)
+    cat <<'EOF'
+harness — durable layer for the project harness.
+
+Commands:
+  init                  Create the harness database
+  migrate               Apply pending schema migrations
+  import  brownfield    Seed DB from existing markdown state
+  intake  [flags]       Record a feature intake classification
+  story   add|update    Add or update a story (test matrix row)
+  decision add|verify   Add a decision or run its verification
+  backlog add|close     Add or close a backlog item
+  trace   [flags]       Record an agent execution trace
+  query   <view>        Query harness data (matrix, backlog, decisions, ...)
+
+Environment:
+  HARNESS_DB            Override database path (default: <repo>/harness.db)
+
+Run 'harness <command> --help' or 'harness query help' for details.
+EOF
+    ;;
+  *) die "Unknown command: $cmd. Run 'harness help'." ;;
+esac
