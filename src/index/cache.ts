@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -77,7 +77,7 @@ async function loadChunks(file: string): Promise<Chunk[]> {
 
 async function writeAtomic(file: string, data: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(tmp, data, "utf8");
   await rename(tmp, file);
 }

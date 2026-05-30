@@ -11,9 +11,11 @@ export const STOP_WORDS = new Set([
 ]);
 
 export const INTENT_TERMS = new Set([
-  "overview", "architecture", "structure", "map", "callers", "callee", "callees", "deps",
-  "dependencies", "imports", "impact", "definition", "implementation", "implemented", "test",
-  "tests", "spec", "example", "fixture", "related", "similar",
+  "overview", "architecture", "structure", "map", "where", "call", "calls", "called",
+  "caller", "callers", "callee", "callees", "deps", "dependency", "dependencies",
+  "imports", "impact", "defined", "definition", "implement", "implementation", "implemented",
+  "test", "tests", "spec", "example", "examples", "fixture", "result", "results",
+  "related", "similar",
 ]);
 
 export const CODE_EXTS = new Set([
