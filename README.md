@@ -24,8 +24,8 @@ Agent
 │  1. Classify query intent               │
 │  2. Generate candidate pool:            │
 │     - srcwalk discover/fusion commands  │
-│     - SQLite/FTS5 BM25/PRF search       │
-│     - optional potion-code-16M vectors  │
+│     - TS-native BM25/PRF cache          │
+│     - srcwalk structural candidates     │
 │  3. RRF fuse candidate ranks            │
 │  4. Confidence gate + abstain check     │
 │  5. srcwalk context/trace/deps expand   │
@@ -52,7 +52,7 @@ Agent
 | `handleAuth` | symbol | `discover --as symbol` |
 | `src/search/rank.rs:23` | exact target | `context <target>` |
 | `src/search/rank.rs` | file | `show <file>` |
-| "how does ranking work?" | broad/natural | BM25/FTS + RRF fusion |
+| "how does ranking work?" | broad/natural | TS BM25/PRF + RRF fusion |
 | "who calls sort?" | callers | discover → trace callers |
 | "what does sort call?" | callees | discover → trace callees |
 | "deps of rank.rs" | deps | deps <file> |
@@ -83,35 +83,31 @@ Primary strategy fails
 
 ## RRF fusion
 
-Thay vì sequential pipeline, v9 dùng **three-rank RRF** để merge:
+Runtime Pi extension dùng **two-rank RRF** để merge TS lexical cache và `srcwalk` structural evidence. Python lab v9 vẫn giữ optional embedding để làm reference/benchmark lịch sử:
 
 ```text
-BM25/FTS rank        weight=1.0
-srcwalk structural   weight=1.0
-embedding rank       weight=0.85  (optional)
+TS BM25/PRF rank     weight=1.0
+srcwalk structural   weight=1.25
+embedding rank       disabled in TS runtime
   ↓
 RRF fusion (K=60)
   ↓
 confidence/abstain gate
 ```
 
-Embedding chỉ chạy khi:
-- query là broad/concept/test (không symbol/file/callers/deps)
-- BM25 cluster không quá mạnh
-- model/index warm
+Embedding không nằm trong TS runtime v1 để tránh Python/model dependency. Nếu cần benchmark embedding, dùng lab Python trong `lab/python/`.
 
 ---
 
 ## Cache format
 
-V9 dùng persistent cache tại:
+TS runtime dùng persistent pure-JSON cache tại:
 
 ```text
-/tmp/pi-srcwalk-v9-cache/<scope-key>/
+/tmp/pi-srcwalk-ts-cache/<scope-key>/
   manifest.json               # file fingerprints
-  chunks.sqlite               # chunk metadata + FTS5 index
-  embeddings.potion-code-16m.float16.npy   # optional
-  embedding_manifest.json                  # optional
+  chunks.jsonl                 # chunk metadata + text/tokens
+  index.json                   # doc frequencies + BM25 postings
 ```
 
 Per `(repo, scope)` cache khoảng:
@@ -128,59 +124,46 @@ Cache rebuild khi file fingerprint thay đổi (size + mtime).
 
 ---
 
-## Optional embedding
+## Embedding
 
-```bash
-python3 router_lab_v9.py --embedding "query" --repo ~/repo --scope src
-```
-
-Dùng `potion-code-16M` (Model2Vec) float16 vectors:
-
-- 256 dims, 0.5KB / chunk vector
-- Build một lần, cache persistent
-- Cold model load ~900ms, warm ~300ms
-- Chỉ bật khi query broad/concept, không mặc định
+TS runtime v1 không ship embedding để không phụ thuộc Python/model runtime. Embedding chỉ còn trong historical Python lab (`lab/python/router_lab_v9.py`) để so sánh benchmark khi cần.
 
 ---
 
 ## Usage
 
-### CLI
+### Pi package / extension
 
 ```bash
-# Single query
-python3 router_lab_v9.py "how does search ranking work?" \
-  --repo ~/Documents/Develope/Ultra-lab/tilth \
-  --scope src
+# Temporary local test
+pi -e ./extensions/pi-srcwalk/index.ts
 
-# With embedding
-python3 router_lab_v9.py "how does remote control work?" \
-  --repo ~/Documents/Develope/uno \
-  --scope src \
-  --embedding
+# Package install from this repo/path once published or checked out
+pi install ./path/to/pi-srcwalk
+```
 
-# Lab benchmark
+The extension registers one agent-facing tool:
+
+```text
+semantic_search(query, scope=".", max_results=3, detail="normal")
+```
+
+Runtime implementation is TypeScript-only. It calls the `srcwalk` CLI for structural evidence and uses a pure TS persistent BM25/PRF cache for lexical retrieval.
+
+### TS engine smoke
+
+```bash
+# Requires TypeScript runtime/dev deps if run outside Pi's extension loader
+npm run smoke -- "execute_search" -- --scope . --max-results 2 --detail brief
+```
+
+### Historical Python lab
+
+```bash
+cd lab/python
 python3 router_lab_v9.py --lab
 python3 router_lab_v9.py --lab --only-repo ghidra
 python3 router_lab_v9.py --lab --embedding
-```
-
-### Python API
-
-```python
-from router_lab_v9 import execute_search
-
-result = execute_search(
-    query="who calls sort?",
-    repo="/path/to/repo",
-    scope="src",
-    max_results=3,
-    enable_embedding=False,
-)
-
-print(result.confidence.reason)
-for candidate in result.candidates:
-    print(candidate.target, candidate.symbol, candidate.score)
 ```
 
 ---
@@ -212,10 +195,10 @@ elapsed: ~22.9s cold, ~12.1s warm
 Full lab reports:
 
 ```text
-LAB_RESULTS_V9.md               # core 17 cases
-LAB_RESULTS_V9_GHIDRA.md        # Ghidra 11 cases
-LAB_RESULTS_V9_SUMMARY.md       # summary + cache metrics
-LAB_RESULTS_V9_EMBEDDING_SMOKE.md  # embedding smoke test
+lab/reports/LAB_RESULTS_V9.md                  # core 17 cases
+lab/reports/LAB_RESULTS_V9_GHIDRA.md           # Ghidra 11 cases
+lab/reports/LAB_RESULTS_V9_SUMMARY.md          # summary + cache metrics
+lab/reports/LAB_RESULTS_V9_EMBEDDING_SMOKE.md  # embedding smoke test
 ```
 
 ---
@@ -238,19 +221,19 @@ LAB_RESULTS_V9_EMBEDDING_SMOKE.md  # embedding smoke test
 
 ```text
 pi-srcwalk/
-├── README.md                        # This file
-├── router_lab_v9.py                 # Current best lab shape
-├── router_lab_v3.py                 # Core router/parser
-├── router_lab_v4.py                 # BM25 index + PRF + srcwalk commands
-├── router_lab_v6.py                 # Embedding model + rerank logic
-├── router_lab_v7.py                 # Benchmark + confidence gate
-├── router_lab_v8.py                 # RRF fusion
-├── LAB_RESULTS_V9_SUMMARY.md        # v9 summary + metrics
-├── LAB_RESULTS_V9.md                # v9 full lab run
-├── LAB_RESULTS_V9_GHIDRA.md         # v9 Ghidra run
-├── LAB_RESULTS_V*.md                # Older lab reports
-├── router_lab_v*.py                 # Older lab versions
-└── router_lab.py                    # v1 prototype
+├── package.json                     # Pi package manifest
+├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint
+├── src/                             # TS-native runtime engine
+│   ├── engine.ts                    # semantic_search orchestration
+│   ├── index/                       # pure TS chunk cache + BM25/PRF
+│   ├── router/                      # intent detection + command planning
+│   ├── srcwalk/                     # srcwalk runner/parser
+│   ├── ranking/                     # RRF + confidence/abstain
+│   └── output/                      # evidence packet + truncation
+└── lab/
+    ├── python/router_lab_v9.py      # historical best Python lab
+    ├── python/router_lab_v*.py      # older lab versions
+    └── reports/LAB_RESULTS_V*.md    # benchmark reports
 ```
 
 ---
@@ -269,7 +252,7 @@ pi-srcwalk/
 
 ```text
 smart srcwalk evidence wrapper
-with persistent BM25/FTS cache + RRF fusion
+with TS-native persistent BM25/PRF cache + RRF fusion
 ```
 
 **Chưa nên claim:** "semantic search mạnh" hay "true embedding retrieval".
@@ -286,5 +269,5 @@ Not a Semble clone. Học RRF fusion từ Semble, không copy architecture.
 
 ---
 
-**Status:** Lab phase complete — v9 validated on 3 codebases (28 cases across 4 repos)  
-**Next:** Productionize as MCP tool / agent skill
+**Status:** TS-native Pi extension implementation started; Python v9 lab remains benchmark/reference material.
+**Next:** Validate package loading in Pi and compare TS results against selected v9 golden cases.

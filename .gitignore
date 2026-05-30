@@ -16,3 +16,6 @@ __pycache__/
 
 # Local agent/task state.
 .pi/
+
+# Node dependencies.
+node_modules/

@@ -1,0 +1,28 @@
+{
+  "name": "pi-srcwalk",
+  "version": "0.1.0",
+  "description": "TS-native srcwalk evidence search extension for Pi coding agent",
+  "type": "module",
+  "keywords": ["pi-package", "srcwalk", "coding-agent", "semantic-search"],
+  "pi": {
+    "extensions": ["./extensions/pi-srcwalk/index.ts"]
+  },
+  "scripts": {
+    "check:ts": "tsc --noEmit",
+    "smoke": "node --loader ts-node/esm src/cli.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
