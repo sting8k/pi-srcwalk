@@ -6,11 +6,8 @@ import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 
 const Params = Type.Object({
-  query: Type.String({ description: "Natural language, symbol, file, or srcwalk target to find evidence for." }),
-  scope: Type.Optional(Type.String({ description: "Relative repo scope to search. Defaults to '.'. Absolute paths and '..' are rejected." })),
-  max_results: Type.Optional(Type.Number({ description: "Maximum candidates to return. Defaults to 3, capped at 10." })),
-  detail: Type.Optional(Type.String({ description: "Evidence expansion depth: brief, normal, or deep. Defaults to normal." })),
-  verbose: Type.Optional(Type.Boolean({ description: "Include per-candidate scoring evidence in the packet." })),
+  query: Type.String({ description: "What to find in the current repo: a natural-language question, symbol, file, or srcwalk target." }),
+  scope: Type.Optional(Type.String({ description: "Optional relative repo subdirectory to narrow search when the user names a clear module/path. Defaults to the whole repo. Absolute paths and '..' are rejected." })),
 });
 
 interface ThemeLike {
@@ -37,10 +34,12 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_search",
     label: "Semantic Search",
-    description: "Search code evidence using srcwalk plus a TS-native persistent BM25/PRF cache and RRF fusion. Output is truncated to 2000 lines or 50KB; full output is saved to a temp file when truncated.",
+    description: "Search code evidence in the current repo using srcwalk plus a TS-native persistent BM25/PRF cache and RRF fusion. Provide a query; optionally provide a relative scope only when narrowing to a known module/path. Output is truncated to 2000 lines or 50KB; full output is saved to a temp file when truncated.",
     promptSnippet: "Find exact code evidence with srcwalk-backed semantic_search",
     promptGuidelines: [
       "Use semantic_search before raw grep when the user asks where code lives, how an implementation works, who calls a symbol, or which files are relevant.",
+      "Call semantic_search with query only by default; set scope only when the user names a clear repo subdirectory or prior evidence identifies the module to inspect.",
+      "Do not try to tune result count, depth, verbosity, repo, or embedding options; semantic_search chooses those defaults internally.",
       "Treat semantic_search abstained=true as no strong match; do not claim evidence exists unless candidates or expansion output support it.",
       "Use semantic_search targets as bounded evidence; follow up with read/edit tools only after selecting exact paths or ranges.",
     ],
@@ -48,21 +47,19 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     prepareArguments(args: unknown) {
       if (!args || typeof args !== "object") return args;
       const input = args as Record<string, unknown>;
-      if (typeof input.maxResults === "number" && input.max_results === undefined) return { ...input, max_results: input.maxResults };
-      return args;
+      return { query: input.query, scope: input.scope };
     },
-    async execute(_toolCallId: string, params: { query: string; scope?: string; max_results?: number; detail?: string; verbose?: boolean }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+    async execute(_toolCallId: string, params: { query: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       onUpdate?.({ content: [{ type: "text", text: "Running semantic_search..." }] });
-      const detail = params.detail === "brief" || params.detail === "deep" ? params.detail : "normal";
       const result = await executeSearch({
         query: params.query,
         repo: ctx.cwd,
         scope: params.scope ?? ".",
-        maxResults: params.max_results ?? 3,
-        detail,
+        maxResults: 3,
+        detail: "normal",
         signal,
       });
-      const packet = formatResult(result, Boolean(params.verbose));
+      const packet = formatResult(result, false);
       const truncated = await truncateForTool(packet);
       const details: SemanticSearchDetails = {
         query: result.plan.query,

@@ -5,7 +5,7 @@
 Agent chỉ thấy 1 tool duy nhất:
 
 ```text
-semantic_search(query, scope=".", max_results=3)
+semantic_search(query, scope?)
 ```
 
 Wrapper tự động route query, gọi `srcwalk` commands phù hợp, fuse kết quả bằng BM25/PRF + RRF, expand evidence với context/trace/deps, trả về compact evidence packet.
@@ -145,10 +145,10 @@ pi install ./path/to/pi-srcwalk
 The extension registers one agent-facing tool:
 
 ```text
-semantic_search(query, scope=".", max_results=3, detail="normal")
+semantic_search(query, scope?)
 ```
 
-Runtime implementation is TypeScript-only. It calls the `srcwalk` CLI for structural evidence and uses a pure TS persistent BM25/PRF cache for lexical retrieval.
+Runtime implementation is TypeScript-only. It calls the `srcwalk` CLI for structural evidence and uses a pure TS persistent BM25/PRF cache for lexical retrieval. Agent-facing knobs are intentionally minimal: pass only `query` by default; add `scope` only when narrowing to a known repo subdirectory is clearly useful.
 
 ### TS engine smoke
 
