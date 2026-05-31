@@ -171,9 +171,5 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
 }
 
 export function validateScope(scope: string): string {
-  const normalized = scope.trim() || ".";
-  if (path.isAbsolute(normalized) || normalized.split(/[\\/]+/).includes("..")) {
-    throw new Error(`Invalid scope: ${scope}. Scope must be relative to the current repo.`);
-  }
-  return normalized;
+  return scope.trim() || ".";
 }

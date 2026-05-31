@@ -7,7 +7,7 @@ import { truncateForTool } from "../../src/output/truncate.js";
 
 const Params = Type.Object({
   query: Type.String({ description: "What to find: a question, symbol, file path, path:line, callers/callees/deps request, overview, or test search." }),
-  scope: Type.Optional(Type.String({ description: "Optional relative subdirectory to search when the user or prior evidence identifies a module. Omit by default. Absolute paths and '..' are rejected." })),
+  scope: Type.Optional(Type.String({ description: "Optional scope to search when the user or prior evidence identifies a module/path. Omit by default." })),
 });
 
 interface ThemeLike {
