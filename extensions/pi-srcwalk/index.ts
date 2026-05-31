@@ -6,8 +6,8 @@ import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 
 const Params = Type.Object({
-  query: Type.String({ description: "What to find in the current repo: a natural-language question, symbol, file, or srcwalk target." }),
-  scope: Type.Optional(Type.String({ description: "Optional relative repo subdirectory to narrow search when the user names a clear module/path. Defaults to the whole repo. Absolute paths and '..' are rejected." })),
+  query: Type.String({ description: "What to find: a question, symbol, file path, path:line, callers/callees/deps request, overview, or test search." }),
+  scope: Type.Optional(Type.String({ description: "Optional relative subdirectory to search when the user or prior evidence identifies a module. Omit by default. Absolute paths and '..' are rejected." })),
 });
 
 interface ThemeLike {
@@ -34,14 +34,13 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_search",
     label: "Semantic Search",
-    description: "Search code evidence in the current repo using srcwalk plus a TS-native persistent BM25/PRF cache and RRF fusion. Provide a query; optionally provide a relative scope only when narrowing to a known module/path. Output is truncated to 2000 lines or 50KB; full output is saved to a temp file when truncated.",
-    promptSnippet: "Find exact code evidence with srcwalk-backed semantic_search",
+    description: "Find relevant code evidence in the current repo. Handles natural-language, symbol, file, caller/callee, dependency, overview, and test queries; returns ranked candidates, retrieval confidence, and bounded srcwalk evidence.",
+    promptSnippet: "Find ranked code evidence with srcwalk-backed semantic_search",
     promptGuidelines: [
-      "Use semantic_search before raw grep when the user asks where code lives, how an implementation works, who calls a symbol, or which files are relevant.",
-      "Call semantic_search with query only by default; set scope only when the user names a clear repo subdirectory or prior evidence identifies the module to inspect.",
-      "Do not try to tune result count, depth, verbosity, repo, or embedding options; semantic_search chooses those defaults internally.",
-      "Treat semantic_search abstained=true as no strong match; do not claim evidence exists unless candidates or expansion output support it.",
-      "Use semantic_search targets as bounded evidence; follow up with read/edit tools only after selecting exact paths or ranges.",
+      "Use semantic_search first for code discovery or navigation questions, including where code lives, how an implementation works, who calls a symbol, dependencies, overviews, tests, or relevant files.",
+      "Call semantic_search with query only by default. Set scope only when the user names a repo subdirectory or prior evidence identifies the module to inspect.",
+      "Treat Retrieval confidence as confidence in candidate selection. If it is medium/low or abstained=true, narrow scope or verify with returned evidence before claiming an answer.",
+      "Use returned targets as bounded evidence. Read exact files or ranges before editing or making detailed code claims.",
     ],
     parameters: Params,
     prepareArguments(args: unknown) {
