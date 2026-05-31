@@ -1,6 +1,6 @@
 export type Intent = "overview" | "callers" | "callees" | "deps" | "impact" | "definition" | "test" | "related" | "general";
 export type QueryKind = "explicit_target" | "overview" | "file" | "file_deps" | "intent_symbol" | "test" | "symbol" | "general";
-export type ParseMode = "discover" | "context" | "show" | "deps" | "overview" | "trace" | "bm25" | "assess";
+export type ParseMode = "discover" | "context" | "show" | "deps" | "overview" | "trace" | "bm25" | "assess" | "review";
 export type DetailLevel = "brief" | "normal" | "deep";
 
 export interface SrcwalkCommand {

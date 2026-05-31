@@ -1,14 +1,15 @@
 # pi-srcwalk
 
-**Single-tool semantic search wrapper for `srcwalk` CLI — designed for AI coding agents.**
+**Agent evidence tools for `srcwalk` CLI — designed for AI coding agents.**
 
-Agent chỉ thấy 1 tool duy nhất:
+Agent thấy 2 tool chính:
 
 ```text
 semantic_search(query, scope?)
+semantic_review(target?, scope?)
 ```
 
-Wrapper tự động route query, gọi `srcwalk` commands phù hợp, fuse kết quả bằng BM25/PRF + RRF, expand evidence với context/trace/deps, trả về compact evidence packet.
+Wrapper tự động route search/review intent, gọi `srcwalk` commands phù hợp, fuse kết quả search bằng BM25/PRF + RRF, expand evidence với context/trace/deps/review, trả về compact evidence packet.
 
 ---
 
@@ -17,6 +18,7 @@ Wrapper tự động route query, gọi `srcwalk` commands phù hợp, fuse kế
 ```text
 Agent
   │ semantic_search("how does ranking work?")
+  │ semantic_review() for current diffs
   ▼
 ┌─────────────────────────────────────────┐
 │  pi-srcwalk wrapper                     │
@@ -36,7 +38,7 @@ Agent
 ┌─────────────────────────────────────────┐
 │  srcwalk CLI (structural evidence)      │
 │  discover · context · trace · deps ·    │
-│  overview · show                        │
+│  overview · show · review               │
 └──────────────┬──────────────────────────┘
                │
                ▼
@@ -58,6 +60,7 @@ Agent
 | "deps of rank.rs" | deps | deps <file> |
 | "overview of src/search" | overview | overview --symbols |
 | "tests for ranking" | test search | test scope + topic BM25 |
+| "review staged changes" | change review | `srcwalk review --staged` |
 
 ### Intent detection
 
@@ -142,13 +145,14 @@ pi -e ./extensions/pi-srcwalk/index.ts
 pi install ./path/to/pi-srcwalk
 ```
 
-The extension registers one agent-facing tool:
+The extension registers two agent-facing tools:
 
 ```text
 semantic_search(query, scope?)
+semantic_review(target?, scope?)
 ```
 
-Runtime implementation is TypeScript-only. It calls the `srcwalk` CLI for structural evidence and uses a pure TS persistent BM25/PRF cache for lexical retrieval. Agent-facing knobs are intentionally minimal: pass only `query` by default; add `scope` only when narrowing to a known repo subdirectory is clearly useful.
+Runtime implementation is TypeScript-only. `semantic_search` calls `srcwalk` plus a pure TS BM25/PRF cache for existing-code evidence. `semantic_review` calls `srcwalk review` for staged or working-tree diffs. Agent-facing knobs are intentionally minimal: pass only `query` for search by default, and call `semantic_review()` with no arguments for staged changes.
 
 ### TS engine smoke
 
