@@ -22,12 +22,6 @@ function isBroadNonStructuralQuery(plan: QueryPlan): boolean {
   return plan.queryKind === "general" && ["general", "definition", "related"].includes(plan.intent);
 }
 
-function isSecurityLikeQuery(plan: QueryPlan): boolean {
-  const q = plan.query.toLowerCase();
-  if (/\b(idor|authz|authori[sz]ation|unauthori[sz]ed|without permission|bypass|vulnerab|leak|tenant|owner|ownership|id_customer|id_order)\b/.test(q)) return true;
-  return /\b(access|permission|permissions)\b/.test(q) && /\b(controller|endpoint|api|customer|order|data|id)\b/.test(q);
-}
-
 function hasExactSymbolAnchorHit(plan: QueryPlan, top: Candidate[]): boolean {
   return top.slice(0, 3).some((cand) => exactSymbolAnchorMatches(plan, cand).length > 0);
 }
@@ -58,9 +52,6 @@ export function confidenceReport(plan: QueryPlan, top: Candidate[]): ConfidenceR
   if (["explicit_target", "file", "file_deps", "overview", "symbol"].includes(plan.queryKind)) return { abstained: false, level: "high", reason: "explicit structural query", topScore: scores[0]!, topGap: gap, topFileCluster: cluster, pathKeywordCoverage: coverage };
   if (["callers", "callees", "deps", "impact"].includes(plan.intent)) return { abstained: false, level: "high", reason: "structural intent query", topScore: scores[0]!, topGap: gap, topFileCluster: cluster, pathKeywordCoverage: coverage };
 
-  if (isSecurityLikeQuery(plan) && isBroadNonStructuralQuery(plan) && coverage < 0.5 && !exactAnchorHit) {
-    return { abstained: false, level: "medium", reason: "security-like query has weak path/symbol anchor coverage; verify candidates manually", topScore: scores[0]!, topGap: gap, topFileCluster: cluster, pathKeywordCoverage: coverage };
-  }
   if (isBroadNonStructuralQuery(plan) && coverage === 0 && !exactAnchorHit && scores[0]! >= 85) {
     return { abstained: false, level: "medium", reason: "high lexical score without path/symbol anchor coverage", topScore: scores[0]!, topGap: gap, topFileCluster: cluster, pathKeywordCoverage: coverage };
   }
