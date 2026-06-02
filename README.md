@@ -77,8 +77,8 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                        Agent (Pi)                          │
-│   semantic_search("how does ranking work?", scope?")       │
+│                        Agent (Pi)                           │
+│   semantic_search("how does ranking work?", scope?")        │
 │   semantic_review({ target: "staged" })                     │
 └──────────────┬──────────────────────────────────────────────┘
                │ query + optional scope
@@ -92,34 +92,34 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 │  │ callers? deps?│  │ pure JSON    │  │ deps, overview,  │  │
 │  │ overview? test│  │ auto-rebuild │  │ context, show    │  │
 │  └───────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
-│          │                 │                    │            │
-│          └─────────┬───────┴────────────────────┘            │
-│                    ▼                                         │
-│          ┌─────────────────┐                                 │
-│          │  RRF fusion     │                                 │
-│          │  ┌─ BM25 rank   │                                 │
-│          │  ├─ structural  │                                 │
-│          │  └─ score merge │                                 │
-│          └────────┬────────┘                                 │
-│                   ▼                                          │
-│          ┌─────────────────┐                                 │
-│          │ confidence gate │  ─ high / medium / abstain      │
-│          └────────┬────────┘                                 │
-│                   ▼                                          │
-│          ┌─────────────────┐                                 │
-│          │ evidence expand │  ─ context, trace, deps         │
-│          │ (top candidates)│                                 │
-│          └────────┬────────┘                                 │
-│                   ▼                                          │
-│          ┌─────────────────┐                                 │
-│          │ format +        │                                 │
-│          │ truncate 50KB   │                                 │
-│          └────────┬────────┘                                 │
-└───────────────────┼──────────────────────────────────────────┘
+│          │                 │                    │           │
+│          └─────────┬───────┴────────────────────┘           │
+│                    ▼                                        │
+│          ┌─────────────────┐                                │
+│          │  RRF fusion     │                                │
+│          │  ┌─ BM25 rank   │                                │
+│          │  ├─ structural  │                                │
+│          │  └─ score merge │                                │
+│          └────────┬────────┘                                │
+│                   ▼                                         │
+│          ┌─────────────────┐                                │
+│          │ confidence gate │  ─ high / medium / abstain     │
+│          └────────┬────────┘                                │
+│                   ▼                                         │
+│          ┌─────────────────┐                                │
+│          │ evidence expand │  ─ context, trace, deps        │
+│          │ (top candidates)│                                │
+│          └────────┬────────┘                                │
+│                   ▼                                         │
+│          ┌─────────────────┐                                │
+│          │ format +        │                                │
+│          │ truncate 50KB   │                                │
+│          └────────┬────────┘                                │
+└───────────────────┼─────────────────────────────────────────┘
                     │ evidence packet
                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                        Agent (Pi)                          │
+│                        Agent (Pi)                           │
 │  ## Candidates            ## Commands executed              │
 │  1. src/ranking/rank.ts   [ok] srcwalk discover ...         │
 │  2. ...                   [ok] srcwalk context ...          │
