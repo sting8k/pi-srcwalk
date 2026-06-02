@@ -8,7 +8,7 @@ const TARGET_RE = /(?<target>[\w./-]+\.\w+:(?<line>\d+)(?:-(?<end>\d+))?)/;
 
 export function detectIntent(query: string): Intent {
   const q = query.toLowerCase();
-  if (["overview", "architecture", "structure", "map", "what is in", "list files", "module"].some((p) => q.includes(p))) return "overview";
+  if (["overview", "architecture", "structure", "map", "what is in", "list files"].some((p) => q.includes(p))) return "overview";
   if (["who calls", "who uses", "callers", "used by", "usage of", "where used", "where is it used"].some((p) => q.includes(p))) return "callers";
   if (["what does", "callee", "callees", "call flow", "downstream", "what happens inside"].some((p) => q.includes(p))) return "callees";
   if (["deps", "dependencies", "imports", "imported by", "what imports", "what does it import"].some((p) => q.includes(p))) return "deps";
@@ -71,6 +71,20 @@ export function isSymbolLike(query: string): boolean {
   if (/^[A-Z_][A-Z0-9_]*$/.test(q) && q.includes("_")) return true;
   if (q.includes("::") || q.includes("->") || q.includes(".")) return true;
   return false;
+}
+
+export function strongSymbolAnchors(tokens: string[], limit = 3): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const cleaned = token.trim().replace(/^['`]|['`]$/g, "");
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key) || !isSymbolLike(cleaned)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 export function extractTarget(query: string): string | undefined {
@@ -163,6 +177,10 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
   }
 
   if (keywords.length) {
+    const anchors = strongSymbolAnchors(keywords);
+    for (const anchor of anchors) {
+      commands.push(makeCmd(`symbol-exact-${anchor.toLowerCase()}`, ["discover", anchor, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "3000"], "exact symbol anchor lookup", "discover"));
+    }
     commands.push(makeCmd("text-any", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", scope, "--limit", "12", "--budget", "3000"], "natural language text lookup", "discover"));
     commands.push(makeCmd("symbol-glob", ["discover", `*${keywords[0]!.toLowerCase()}*`, "--as", "symbol", "--scope", scope, "--limit", "12", "--budget", "2500"], "symbol fallback for strongest keyword", "discover"));
   }

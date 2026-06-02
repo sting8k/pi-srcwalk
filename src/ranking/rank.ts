@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { Candidate, QueryPlan } from "../domain/types.js";
 import { CODE_EXTS, DOC_EXTS } from "../router/constants.js";
-import { domainKeywords } from "../router/intent.js";
+import { domainKeywords, strongSymbolAnchors } from "../router/intent.js";
 import { candidateFile } from "../srcwalk/parse.js";
 
 const RRF_K = 60;
@@ -13,6 +13,17 @@ function isTestTarget(target: string): boolean {
 
 function isExplanationQuery(plan: QueryPlan): boolean {
   return ["general", "definition", "related"].includes(plan.intent) && /\b(how|work|works|implementation|implemented|calculate|calculation|manage|flow)\b/i.test(plan.query);
+}
+
+export function exactSymbolAnchorMatches(plan: QueryPlan, cand: Candidate): string[] {
+  const anchors = strongSymbolAnchors(domainKeywords(plan));
+  if (!anchors.length) return [];
+  const symbol = cand.symbol?.toLowerCase();
+  const target = cand.target.toLowerCase();
+  return anchors.filter((anchor) => {
+    const low = anchor.toLowerCase();
+    return symbol === low || target.includes(low);
+  });
 }
 
 export function cloneCandidate(c: Candidate): Candidate {
@@ -36,6 +47,11 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
     const target = cand.target.toLowerCase();
     const basename = path.basename(candidateFile(cand)).toLowerCase();
     if (["definition", "grouped-definition", "exact-context"].includes(cand.source)) cand.score += 25;
+    const exactAnchors = exactSymbolAnchorMatches(plan, cand);
+    if (exactAnchors.length && (["definition", "grouped-definition"].includes(cand.source) || cand.commandLabel.startsWith("symbol-exact"))) {
+      cand.score += 95 + exactAnchors.length * 10;
+      cand.evidence.push(`boost: exact symbol anchor ${exactAnchors.join(",")}`);
+    }
     if (["ts-bm25", "ts-bm25-prf"].includes(cand.source)) cand.score += 15;
     if (cand.source === "file-discover") {
       if (kws.some((kw) => basename.includes(kw))) {

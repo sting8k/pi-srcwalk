@@ -36,9 +36,10 @@ semantic_search({ query: string, scope?: string })
 What it does:
 
 - Accepts a natural-language question, a symbol, a file path, `path:line`, or a request like "who calls X", "deps of Y", "overview of Z", "tests for W".
-- Looks up a TypeScript-native persistent BM25/PRF cache.
+- Looks up a TypeScript-native persistent BM25/PRF cache for broad queries.
 - Calls `srcwalk` for structural evidence (discover, context, trace, deps, overview, show).
-- Fuses results with RRF ranking, computes retrieval confidence, and returns a compact evidence packet.
+- Prioritizes exact symbol anchors when a natural-language query names CamelCase or method-like symbols.
+- Uses RRF when lexical and structural rank lists are both available, computes retrieval confidence, and returns a compact evidence packet.
 
 | You ask | It returns |
 |---|---|
@@ -187,7 +188,7 @@ pi-srcwalk/
 2. **Evidence, not summary** — return raw `srcwalk` output as bounded evidence. Don't paraphrase.
 3. **Abstain, don't hallucinate** — if no strong match, say so clearly with `abstained: true`.
 4. **Minimal agent surface** — agent passes `query` and optional `scope`. Knobs stay internal.
-5. **Fallback always** — never return empty; fall through to text search → symbol glob → overview.
+5. **Fallback broadly** — fall through to text search → symbol glob → overview, then abstain when evidence is still weak.
 
 ---
 

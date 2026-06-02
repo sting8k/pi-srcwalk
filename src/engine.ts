@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { Candidate, DetailLevel, SearchResult, SrcwalkCommand } from "./domain/types.js";
 import { bm25Search, shouldRunBm25 } from "./index/bm25.js";
-import { buildPlan, domainKeywords, makeCmd, validateScope } from "./router/intent.js";
+import { buildPlan, domainKeywords, makeCmd, strongSymbolAnchors, validateScope } from "./router/intent.js";
 import { confidenceReport } from "./ranking/confidence.js";
 import { bm25HasStrongCluster, cloneCandidate, dedupeRanked, rrfFuse, scoreCandidates } from "./ranking/rank.js";
 import { assessCmd, candidateFile, candidateToContextCmd, candidateToShowCmd, depsCmd, fallbackSymbol, parseCandidates, parseFileDiscoverCandidates, parseSymbolFromContext, synthesizeCandidateFromCommand, traceCmd } from "./srcwalk/parse.js";
@@ -20,6 +20,8 @@ export interface ExecuteSearchOptions {
 function srcwalkCommandsForPlan(plan: ReturnType<typeof buildPlan>, bm25Candidates: Candidate[]): SrcwalkCommand[] {
   if (!bm25Candidates.length) return plan.commands;
   if (["general", "definition", "test", "related"].includes(plan.intent)) {
+    const exactSymbols = plan.commands.filter((c) => c.label.startsWith("symbol-exact"));
+    if (exactSymbols.length) return exactSymbols.slice(0, 3);
     return plan.commands.filter((c) => c.label.startsWith("symbol-") && c.label !== "text-any").slice(0, 1);
   }
   return plan.commands;
@@ -31,6 +33,9 @@ function extraFusionCommands(plan: ReturnType<typeof buildPlan>): SrcwalkCommand
   const commands: SrcwalkCommand[] = [];
   for (const kw of domainKeywords(plan).slice(0, 3)) {
     const low = kw.toLowerCase();
+    if (strongSymbolAnchors([kw], 1).length) {
+      commands.push(makeCmd(`fusion-symbol-exact-${low}`, ["discover", kw, "--as", "symbol", "--scope", plan.scope, "--limit", "8", "--budget", "2200"], "broad-query exact symbol fusion", "discover"));
+    }
     commands.push(makeCmd(`fusion-symbol-${low}`, ["discover", `*${low}*`, "--as", "symbol", "--scope", plan.scope, "--limit", "8", "--budget", "2200"], "broad-query symbol fusion", "discover"));
     commands.push(makeCmd(`fusion-file-${low}`, ["discover", `*${low}*`, "--as", "file", "--scope", plan.scope, "--limit", "8", "--budget", "1800"], "broad-query file fusion", "discover"));
   }
