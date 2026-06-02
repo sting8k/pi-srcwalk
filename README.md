@@ -77,59 +77,45 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                        Agent (Pi)                           │
-│   semantic_search("how does ranking work?", scope?")        │
-│   semantic_review({ target: "staged" })                     │
-└──────────────┬──────────────────────────────────────────────┘
-               │ query + optional scope
-               ▼
+│                         Agent (Pi)                          │
+│  semantic_search(query, scope?)                             │
+│  semantic_review({ target?, scope? })                       │
+└─────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  pi-srcwalk extension                       │
+│                    pi-srcwalk extension                     │
 │                                                             │
-│  ┌───────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ intent detect │  │ BM25/PRF     │  │ srcwalk commands │  │
-│  │ symbol? file? │  │ chunk cache  │  │ discover, trace, │  │
-│  │ callers? deps?│  │ pure JSON    │  │ deps, overview,  │  │
-│  │ overview? test│  │ auto-rebuild │  │ context, show    │  │
-│  └───────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
-│          │                 │                    │           │
-│          └─────────┬───────┴────────────────────┘           │
-│                    ▼                                        │
-│          ┌─────────────────┐                                │
-│          │  RRF fusion     │                                │
-│          │  ┌─ BM25 rank   │                                │
-│          │  ├─ structural  │                                │
-│          │  └─ score merge │                                │
-│          └────────┬────────┘                                │
-│                   ▼                                         │
-│          ┌─────────────────┐                                │
-│          │ confidence gate │  ─ high / medium / abstain     │
-│          └────────┬────────┘                                │
-│                   ▼                                         │
-│          ┌─────────────────┐                                │
-│          │ evidence expand │  ─ context, trace, deps        │
-│          │ (top candidates)│                                │
-│          └────────┬────────┘                                │
-│                   ▼                                         │
-│          ┌─────────────────┐                                │
-│          │ format +        │                                │
-│          │ truncate 50KB   │                                │
-│          └────────┬────────┘                                │
-└───────────────────┼─────────────────────────────────────────┘
-                    │ evidence packet
-                    ▼
+│  Search lane                                                │
+│    query → intent/route                                     │
+│    symbol / file / callers / deps / overview / test         │
+│    optional BM25/PRF JSON cache                             │
+│      general / definition / test / related only             │
+│    srcwalk discover / overview / show / context / deps      │
+│    rank candidates                                          │
+│    RRF if BM25 + srcwalk both return rank lists             │
+│    otherwise score the available source                     │
+│    confidence gate → high / medium / abstain                │
+│    expand evidence → context/show/trace/deps/assess         │
+│    format search packet → truncate 50KB                     │
+│                                                             │
+│  Review lane                                                │
+│    default target → srcwalk review --staged                 │
+│    working-tree target → srcwalk review                     │
+│    parse changed files / hunks / symbols                    │
+│    format review packet → truncate 50KB                     │
+└─────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                        Agent (Pi)                           │
-│  ## Candidates            ## Commands executed              │
-│  1. src/ranking/rank.ts   [ok] srcwalk discover ...         │
-│  2. ...                   [ok] srcwalk context ...          │
-│  ## Retrieval confidence  ## Evidence expansion             │
-│  level: high              context src/ranking/rank.ts:17... │
-│  source: ranking                                            │
+│                         Agent (Pi)                          │
+│  search output: candidates + confidence + evidence          │
+│  review output: changed evidence + diff stats               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Agent only sees `query` and optional `scope`. Result count, depth, verbosity, and embedding options are internal defaults — the tool chooses them, not the LLM.
+`semantic_search` keeps the agent-facing contract small: the agent passes `query` and optional `scope`; result count, depth, verbosity, and retrieval strategy stay internal. `semantic_review` is separate: it reviews staged changes by default and uses `target: "working-tree"` for unstaged changes.
+
 ---
 
 ## Cache
