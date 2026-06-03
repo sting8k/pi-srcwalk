@@ -33,7 +33,7 @@ interface SemanticSearchDetails {
   scope: string;
   confidence: { abstained: boolean; level: string; reason: string };
   candidates: Array<{ target: string; symbol?: string; score: number; source: string; kind: string }>;
-  cache?: { cacheHit: boolean; chunks: number; files: number; cacheDir: string };
+  cache?: { cacheKind: string; cacheHit: boolean; chunks: number; files: number; cacheLocation: string };
   truncated?: boolean;
   fullOutputPath?: string;
 }
@@ -131,7 +131,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         scope: result.plan.scope,
         confidence: { abstained: result.confidence.abstained, level: result.confidence.level, reason: result.confidence.reason },
         candidates: result.candidates.map((c) => ({ target: c.target, symbol: c.symbol, score: c.score, source: c.source, kind: c.kind })),
-        cache: result.cache ? { cacheHit: result.cache.cacheHit, chunks: result.cache.chunks, files: result.cache.files, cacheDir: result.cache.cacheDir } : undefined,
+        cache: result.cache ? { cacheKind: result.cache.cacheKind, cacheHit: result.cache.cacheHit, chunks: result.cache.chunks, files: result.cache.files, cacheLocation: result.cache.cacheLocation } : undefined,
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
       };

@@ -36,7 +36,7 @@ semantic_search({ query: string, scope?: string })
 What it does:
 
 - Accepts a natural-language question, a symbol, a file path, `path:line`, or a request like "who calls X", "deps of Y", "overview of Z", "tests for W".
-- Looks up a TypeScript-native persistent BM25/PRF cache for broad queries.
+- Looks up a TypeScript-native process-local BM25/PRF memory cache for broad queries.
 - Calls `srcwalk` for structural evidence (discover, context, trace, deps, overview, show).
 - Prioritizes exact symbol anchors when a natural-language query names CamelCase or method-like symbols.
 - Uses RRF when lexical and structural rank lists are both available, computes retrieval confidence, and returns a compact evidence packet.
@@ -90,7 +90,7 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 │  Search lane                                                │
 │    query → intent/route                                     │
 │    symbol / file / callers / deps / overview / test         │
-│    optional BM25/PRF JSON cache                             │
+│    optional compact BM25/PRF memory cache                   │
 │      general / definition / test / related only             │
 │    srcwalk discover / overview / show / context / deps      │
 │    rank candidates                                          │
@@ -121,26 +121,25 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 
 ## Cache
 
-Chunk index is stored on disk as pure JSON:
+Broad-query BM25/PRF uses a process-local compact memory cache:
 
 ```text
-/tmp/pi-srcwalk-ts-cache/<scope-key>/
-  manifest.json    # file fingerprints (size + mtime)
-  chunks.jsonl     # chunk text + tokens
-  index.json       # doc frequencies + BM25 postings
+semantic_search process
+└─ memory:<repo+scope+version hash>
+   ├─ path table + chunk line ranges + short previews
+   ├─ vocab table + token→termId map
+   ├─ typed-array BM25 postings
+   └─ typed-array doc terms for PRF
 ```
 
-Cache auto-rebuilds when files change. Typical sizes:
+The cache does not write chunk/index files to `/tmp`. It rebuilds when file fingerprints change and is bounded with LRU eviction:
 
-| Repo + scope | Chunks | Cache |
-|---|---:|---:|
-| srcwalk `src` | ~600 | ~2.5 MB |
-| Bifrost `framework` | ~900 | ~4.5 MB |
-| Ghidra `Features/Decompiler` | ~3,600 | ~19 MB |
-| Bifrost full | ~11,000 | ~68 MB |
-| Uno `src` | ~33,000 | ~115 MB |
+| Env | Default | Purpose |
+|---|---:|---|
+| `PI_SRCWALK_MEMORY_CACHE_ENTRIES` | `4` | maximum cached repo/scope indexes per process |
+| `PI_SRCWALK_MEMORY_CACHE_MAX_MB` | `512` | approximate memory budget before LRU eviction |
 
-No database, no native dependencies. Node.js built-in `fs` is all it needs.
+The retained memory index avoids full chunk text and duplicated token strings; it keeps only chunk metadata, short previews, vocabulary strings, and typed arrays. No database, no native dependencies.
 
 ---
 
@@ -170,7 +169,7 @@ pi-srcwalk/
 ├── src/                             # TS-native runtime engine
 │   ├── engine.ts                    # semantic_search orchestration
 │   ├── cli.ts                       # dev smoke-test CLI
-│   ├── index/                       # chunk cache + BM25/PRF
+│   ├── index/                       # compact memory cache + BM25/PRF
 │   ├── router/                      # intent detection + command planning
 │   ├── srcwalk/                     # CLI runner + output parser
 │   ├── ranking/                     # RRF fusion + confidence

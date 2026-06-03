@@ -1,53 +1,32 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import type { CacheStats, Chunk, LexicalIndex } from "../domain/types.js";
+import type { LexicalIndex } from "../domain/types.js";
 import { iterFiles } from "./files.js";
 import { tokenize } from "./tokenize.js";
 
-const CACHE_VERSION = "ts-cache-json-bm25-2026-05-30";
+const CACHE_VERSION = "ts-memory-compact-bm25-2026-06-03";
 const CHUNK_LINES = 80;
 const CHUNK_OVERLAP = 10;
+const PREVIEW_CHARS = 180;
+const DEFAULT_MAX_MEMORY_CACHE_ENTRIES = 4;
+const DEFAULT_MAX_MEMORY_CACHE_MB = 512;
 
-interface Manifest {
-  cacheVersion: string;
-  repo: string;
-  scope: string;
+interface MemoryEntry {
   fingerprint: string;
-  files: number;
-  chunks: number;
-  createdAt: number;
-  format: string;
+  index: LexicalIndex;
+  lastAccess: number;
+  sizeBytes: number;
 }
 
-interface DiskIndex {
-  docFreq: Record<string, number>;
-  docLens: number[];
-  postings: Record<string, Array<[number, number]>>;
-  avgdl: number;
-}
+const memoryCache = new Map<string, MemoryEntry>();
 
 export function cacheRoot(): string {
-  return process.env.PI_SRCWALK_CACHE || path.join(os.tmpdir(), "pi-srcwalk-ts-cache");
+  return "memory";
 }
 
 function cacheKey(repo: string, scope: string): string {
   return createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${CACHE_VERSION}`).digest("hex").slice(0, 20);
-}
-
-async function dirSize(dir: string): Promise<number> {
-  let total = 0;
-  async function walk(current: string): Promise<void> {
-    const entries = await import("node:fs/promises").then((fs) => fs.readdir(current, { withFileTypes: true }).catch(() => []));
-    for (const entry of entries) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile()) total += (await stat(full).catch(() => ({ size: 0 }))).size;
-    }
-  }
-  await walk(dir);
-  return total;
 }
 
 async function fingerprintFiles(repo: string, scope: string): Promise<{ fingerprint: string; files: string[] }> {
@@ -62,62 +41,145 @@ async function fingerprintFiles(repo: string, scope: string): Promise<{ fingerpr
   return { fingerprint: h.digest("hex"), files };
 }
 
-async function readJson<T>(file: string): Promise<T | undefined> {
-  try {
-    return JSON.parse(await readFile(file, "utf8")) as T;
-  } catch {
-    return undefined;
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+function maxMemoryEntries(): number {
+  return positiveIntEnv("PI_SRCWALK_MEMORY_CACHE_ENTRIES", DEFAULT_MAX_MEMORY_CACHE_ENTRIES);
+}
+
+function maxMemoryBytes(): number {
+  return positiveIntEnv("PI_SRCWALK_MEMORY_CACHE_MAX_MB", DEFAULT_MAX_MEMORY_CACHE_MB) * 1024 * 1024;
+}
+
+function stringBytes(value: string): number {
+  return value.length * 2;
+}
+
+function estimateIndexSize(index: LexicalIndex): number {
+  let bytes = 0;
+  bytes += index.chunkPathIds.byteLength + index.chunkStarts.byteLength + index.chunkEnds.byteLength;
+  bytes += index.docFreq.byteLength + index.docLens.byteLength;
+  bytes += index.postings.offsets.byteLength + index.postings.docs.byteLength + index.postings.freqs.byteLength;
+  bytes += index.docTerms.offsets.byteLength + index.docTerms.termIds.byteLength + index.docTerms.freqs.byteLength;
+  bytes += index.paths.reduce((sum, value) => sum + stringBytes(value), 0);
+  bytes += index.chunkPreviews.reduce((sum, value) => sum + stringBytes(value), 0);
+  bytes += index.vocab.reduce((sum, value) => sum + stringBytes(value), 0);
+  bytes += index.termIds.size * 32;
+  return bytes;
+}
+
+function pruneMemoryCache(protectedKey: string): void {
+  const maxEntries = maxMemoryEntries();
+  const maxBytes = maxMemoryBytes();
+  let totalBytes = [...memoryCache.values()].reduce((sum, entry) => sum + entry.sizeBytes, 0);
+
+  while (memoryCache.size > maxEntries || totalBytes > maxBytes) {
+    const evictable = [...memoryCache.entries()]
+      .filter(([key]) => key !== protectedKey || memoryCache.size > 1)
+      .sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
+    if (!evictable) break;
+    memoryCache.delete(evictable[0]);
+    totalBytes -= evictable[1].sizeBytes;
   }
 }
 
-async function loadChunks(file: string): Promise<Chunk[]> {
-  const text = await readFile(file, "utf8");
-  return text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as Chunk);
+function touchMemoryEntry(key: string, entry: MemoryEntry): void {
+  entry.lastAccess = Date.now();
+  memoryCache.delete(key);
+  memoryCache.set(key, entry);
 }
 
-async function writeAtomic(file: string, data: string): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmp, data, "utf8");
-  await rename(tmp, file);
+function pathIdFor(paths: string[], pathIds: Map<string, number>, rel: string): number {
+  const existing = pathIds.get(rel);
+  if (existing !== undefined) return existing;
+  const next = paths.length;
+  paths.push(rel);
+  pathIds.set(rel, next);
+  return next;
+}
+
+function termIdFor(vocab: string[], termIds: Map<string, number>, term: string): number {
+  const existing = termIds.get(term);
+  if (existing !== undefined) return existing;
+  const next = vocab.length;
+  vocab.push(term);
+  termIds.set(term, next);
+  return next;
+}
+
+function toUint16(value: number): number {
+  return Math.min(value, 0xffff);
+}
+
+function preview(text: string): string {
+  return text.trim().replace(/\s+/g, " ").slice(0, PREVIEW_CHARS);
+}
+
+function buildPostings(vocabSize: number, postingsByTerm: Map<number, Array<[number, number]>>) {
+  const offsets = new Uint32Array(vocabSize + 1);
+  let total = 0;
+  for (let termId = 0; termId < vocabSize; termId += 1) {
+    offsets[termId] = total;
+    total += postingsByTerm.get(termId)?.length ?? 0;
+  }
+  offsets[vocabSize] = total;
+
+  const docs = new Uint32Array(total);
+  const freqs = new Uint16Array(total);
+  const docFreq = new Uint32Array(vocabSize);
+  let cursor = 0;
+  for (let termId = 0; termId < vocabSize; termId += 1) {
+    const postings = postingsByTerm.get(termId) ?? [];
+    docFreq[termId] = postings.length;
+    for (const [doc, freq] of postings) {
+      docs[cursor] = doc;
+      freqs[cursor] = toUint16(freq);
+      cursor += 1;
+    }
+  }
+  return { docFreq, postings: { offsets, docs, freqs } };
+}
+
+function buildDocTerms(offsetsRaw: number[], termIdsRaw: number[], freqsRaw: number[]) {
+  return {
+    offsets: Uint32Array.from(offsetsRaw),
+    termIds: Uint32Array.from(termIdsRaw),
+    freqs: Uint16Array.from(freqsRaw.map(toUint16)),
+  };
 }
 
 export async function buildOrLoadIndex(repoInput: string, scope: string): Promise<LexicalIndex> {
   const started = performance.now();
   const repo = path.resolve(repoInput);
-  const dir = path.join(cacheRoot(), cacheKey(repo, scope));
-  const manifestPath = path.join(dir, "manifest.json");
-  const chunksPath = path.join(dir, "chunks.jsonl");
-  const indexPath = path.join(dir, "index.json");
+  const key = cacheKey(repo, scope);
+  const location = `memory:${key}`;
   const { fingerprint, files } = await fingerprintFiles(repo, scope);
-  const manifest = await readJson<Manifest>(manifestPath);
-  const disk = await readJson<DiskIndex>(indexPath);
-  if (manifest?.fingerprint === fingerprint && manifest.cacheVersion === CACHE_VERSION && disk) {
-    const chunks = await loadChunks(chunksPath).catch(() => undefined);
-    if (chunks) {
-      const buildMs = Math.round(performance.now() - started);
-      return {
-        chunks,
-        docFreq: disk.docFreq,
-        docLens: disk.docLens,
-        postings: disk.postings,
-        avgdl: disk.avgdl,
-        stats: {
-          cacheDir: dir,
-          cacheHit: true,
-          chunks: chunks.length,
-          files: manifest.files,
-          fingerprint,
-          buildMs,
-          queryMs: 0,
-          sizeBytes: await dirSize(dir),
-        },
-      };
-    }
+  const cached = memoryCache.get(key);
+  if (cached?.fingerprint === fingerprint) {
+    touchMemoryEntry(key, cached);
+    const buildMs = Math.round(performance.now() - started);
+    cached.index.stats = { ...cached.index.stats, cacheHit: true, files: files.length, fingerprint, buildMs, queryMs: 0 };
+    return cached.index;
   }
 
-  const chunks: Chunk[] = [];
+  const paths: string[] = [];
+  const pathIds = new Map<string, number>();
+  const chunkPathIdsRaw: number[] = [];
+  const chunkStartsRaw: number[] = [];
+  const chunkEndsRaw: number[] = [];
+  const chunkPreviews: string[] = [];
+  const vocab: string[] = [];
+  const termIds = new Map<string, number>();
+  const docLensRaw: number[] = [];
+  const postingsByTerm = new Map<number, Array<[number, number]>>();
+  const docTermOffsetsRaw: number[] = [0];
+  const docTermIdsRaw: number[] = [];
+  const docTermFreqsRaw: number[] = [];
   const step = Math.max(1, CHUNK_LINES - CHUNK_OVERLAP);
+
   for (const file of files) {
     const rel = path.relative(repo, file).split(path.sep).join("/");
     const text = await readFile(file, "utf8").catch(() => undefined);
@@ -125,51 +187,73 @@ export async function buildOrLoadIndex(repoInput: string, scope: string): Promis
     const lines = text.split(/\r?\n/);
     if (!lines.length) continue;
     const pathTokens = tokenize(rel.replaceAll("/", " "));
+    const pathId = pathIdFor(paths, pathIds, rel);
     for (let startLine = 0; startLine < lines.length; startLine += step) {
       const block = lines.slice(startLine, startLine + CHUNK_LINES);
       if (!block.length) continue;
       const chunkText = block.join("\n");
       const tokens = [...pathTokens, ...tokenize(chunkText)];
       if (tokens.length < 3) continue;
-      chunks.push({ path: rel, start: startLine + 1, end: startLine + block.length, text: chunkText, tokens });
+
+      const counts = new Map<number, number>();
+      for (const token of tokens) {
+        const termId = termIdFor(vocab, termIds, token);
+        counts.set(termId, (counts.get(termId) ?? 0) + 1);
+      }
+
+      const docId = chunkPathIdsRaw.length;
+      chunkPathIdsRaw.push(pathId);
+      chunkStartsRaw.push(startLine + 1);
+      chunkEndsRaw.push(startLine + block.length);
+      chunkPreviews.push(preview(chunkText));
+      docLensRaw.push(tokens.length);
+
+      const sortedTerms = [...counts.entries()].sort((a, b) => a[0] - b[0]);
+      for (const [termId, freq] of sortedTerms) {
+        if (!postingsByTerm.has(termId)) postingsByTerm.set(termId, []);
+        postingsByTerm.get(termId)!.push([docId, freq]);
+        docTermIdsRaw.push(termId);
+        docTermFreqsRaw.push(freq);
+      }
+      docTermOffsetsRaw.push(docTermIdsRaw.length);
     }
   }
 
-  const docFreq: Record<string, number> = Object.create(null) as Record<string, number>;
-  const docLens: number[] = [];
-  const postings: Record<string, Array<[number, number]>> = Object.create(null) as Record<string, Array<[number, number]>>;
-  chunks.forEach((chunk, idx) => {
-    docLens.push(chunk.tokens.length);
-    const counts = new Map<string, number>();
-    for (const token of chunk.tokens) counts.set(token, (counts.get(token) ?? 0) + 1);
-    for (const [term, freq] of counts) {
-      docFreq[term] = (Object.prototype.hasOwnProperty.call(docFreq, term) ? docFreq[term]! : 0) + 1;
-      if (!Object.prototype.hasOwnProperty.call(postings, term)) postings[term] = [];
-      postings[term]!.push([idx, freq]);
-    }
-  });
-  const avgdl = docLens.length ? docLens.reduce((a, b) => a + b, 0) / docLens.length : 0;
+  const docLens = Uint32Array.from(docLensRaw);
+  const { docFreq, postings } = buildPostings(vocab.length, postingsByTerm);
+  const docTerms = buildDocTerms(docTermOffsetsRaw, docTermIdsRaw, docTermFreqsRaw);
+  const avgdl = docLens.length ? docLensRaw.reduce((a, b) => a + b, 0) / docLens.length : 0;
   const buildMs = Math.round(performance.now() - started);
-  await mkdir(dir, { recursive: true });
-  await writeAtomic(chunksPath, chunks.map((chunk) => JSON.stringify(chunk)).join("\n") + (chunks.length ? "\n" : ""));
-  await writeAtomic(indexPath, JSON.stringify({ docFreq, docLens, postings, avgdl } satisfies DiskIndex));
-  await writeAtomic(manifestPath, JSON.stringify({ cacheVersion: CACHE_VERSION, repo, scope, fingerprint, files: files.length, chunks: chunks.length, createdAt: Math.floor(Date.now() / 1000), format: "json chunks + inverted bm25 postings" } satisfies Manifest, null, 2));
-
-  return {
-    chunks,
+  const index: LexicalIndex = {
+    chunkCount: chunkPathIdsRaw.length,
+    paths,
+    chunkPathIds: Uint32Array.from(chunkPathIdsRaw),
+    chunkStarts: Uint32Array.from(chunkStartsRaw),
+    chunkEnds: Uint32Array.from(chunkEndsRaw),
+    chunkPreviews,
+    vocab,
+    termIds,
     docFreq,
     docLens,
     postings,
+    docTerms,
     avgdl,
     stats: {
-      cacheDir: dir,
+      cacheKind: "memory",
+      cacheLocation: location,
       cacheHit: false,
-      chunks: chunks.length,
+      chunks: chunkPathIdsRaw.length,
       files: files.length,
       fingerprint,
       buildMs,
       queryMs: 0,
-      sizeBytes: await dirSize(dir),
+      sizeBytes: 0,
     },
   };
+  index.stats.sizeBytes = estimateIndexSize(index);
+
+  const entry: MemoryEntry = { fingerprint, index, lastAccess: Date.now(), sizeBytes: index.stats.sizeBytes };
+  memoryCache.set(key, entry);
+  pruneMemoryCache(key);
+  return index;
 }

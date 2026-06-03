@@ -64,16 +64,9 @@ export interface SearchResult {
   cache?: CacheStats;
 }
 
-export interface Chunk {
-  path: string;
-  start: number;
-  end: number;
-  text: string;
-  tokens: string[];
-}
-
 export interface CacheStats {
-  cacheDir: string;
+  cacheKind: "memory";
+  cacheLocation: string;
   cacheHit: boolean;
   chunks: number;
   files: number;
@@ -83,11 +76,31 @@ export interface CacheStats {
   sizeBytes: number;
 }
 
+export interface CompactPostings {
+  offsets: Uint32Array;
+  docs: Uint32Array;
+  freqs: Uint16Array;
+}
+
+export interface CompactDocTerms {
+  offsets: Uint32Array;
+  termIds: Uint32Array;
+  freqs: Uint16Array;
+}
+
 export interface LexicalIndex {
-  chunks: Chunk[];
-  docFreq: Record<string, number>;
-  docLens: number[];
-  postings: Record<string, Array<[number, number]>>;
+  chunkCount: number;
+  paths: string[];
+  chunkPathIds: Uint32Array;
+  chunkStarts: Uint32Array;
+  chunkEnds: Uint32Array;
+  chunkPreviews: string[];
+  vocab: string[];
+  termIds: Map<string, number>;
+  docFreq: Uint32Array;
+  docLens: Uint32Array;
+  postings: CompactPostings;
+  docTerms: CompactDocTerms;
   avgdl: number;
   stats: CacheStats;
 }
