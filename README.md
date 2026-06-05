@@ -2,10 +2,11 @@
 
 Code evidence tools for AI coding agents — built on [`srcwalk`](https://github.com/sting8k/srcwalk).
 
-Two agent-facing tools:
+Three agent-facing tools:
 
 - **`semantic_search`** — find existing code evidence: symbols, files, callers, deps, overviews, tests, and natural-language questions.
 - **`semantic_review`** — review staged or working-tree changes with diff evidence and risk hints.
+- **`semantic_show`** — open a specific candidate from a previous search, or a direct target `path:line`, showing its structural context (flow map, callers, callees) or raw code.
 
 No Python runtime. Pure TypeScript. Ships as a [Pi](https://github.com/earendil-works/pi) extension package.
 
@@ -21,7 +22,7 @@ pi -e ./extensions/pi-srcwalk/index.ts
 pi install ./path/to/pi-srcwalk
 ```
 
-After `/reload` in Pi, both `semantic_search` and `semantic_review` become available.
+After `/reload` in Pi, all three tools become available.
 
 ---
 
@@ -72,6 +73,35 @@ What it does:
 
 Use `semantic_review` when the user asks to review, check, summarize, or assess current changes.
 
+### `semantic_show`
+
+```ts
+semantic_show({
+  search_id?: string,  // from a previous semantic_search
+  candidate_id?: number,
+  target?: string,     // alternative: direct path:line
+  mode?: string,       // "context" (default) or "show"
+  scope?: string,      // override scope for context mode
+})
+```
+
+What it does:
+
+- Opens a specific candidate from a previous `semantic_search` by `search_id + candidate_id` without manually copying the target path.
+- Also accepts a direct `target` (`path:line`) for stateless usage without a prior search.
+- Default mode `"context"` shows structural analysis: flow map, call neighborhood, callees, and callers.
+- Mode `"show"` shows raw code with surrounding context lines.
+
+```ts
+// Example: open candidate #1 from a previous search
+semantic_search({ query: "buildOrLoadIndex" })
+// → returns search_id: "r595b4-s1", candidates: [...]
+semantic_show({ search_id: "r595b4-s1", candidate_id: 1 })
+
+// Stateless: directly show target
+semantic_show({ target: "src/index/cache.ts:154-259", mode: "show" })
+```
+
 ---
 
 ## How it works
@@ -81,6 +111,7 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 │                         Agent (Pi)                          │
 │  semantic_search(query, scope?)                             │
 │  semantic_review({ target?, scope? })                       │
+│  semantic_show({ search_id?, candidate_id?, target?, mode? })│
 └─────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -112,6 +143,7 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 │                         Agent (Pi)                          │
 │  search output: candidates + confidence + evidence          │
 │  review output: changed evidence + diff stats               │
+│  show output: context packet or raw code                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -165,7 +197,7 @@ Python lab files and reports live on the `lab` branch.
 ```text
 pi-srcwalk/
 ├── package.json                     # Pi package manifest
-├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (2 tools)
+├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (3 tools)
 ├── src/                             # TS-native runtime engine
 │   ├── engine.ts                    # semantic_search orchestration
 │   ├── cli.ts                       # dev smoke-test CLI

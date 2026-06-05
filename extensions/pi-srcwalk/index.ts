@@ -7,6 +7,8 @@ import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 import { commandDisplay } from "../../src/router/intent.js";
 import { runCommand } from "../../src/srcwalk/runner.js";
+import crypto from "node:crypto";
+import path from "node:path";
 
 const SearchParams = Type.Object({
   query: Type.String({ description: "What to find: a question, symbol, file path, path:line, callers/callees/deps request, overview, or test search." }),
@@ -17,6 +19,15 @@ const ReviewParams = Type.Object({
   target: Type.Optional(Type.String({ description: "Changes to review: 'staged' (default) or 'working-tree'." })),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit review evidence; omit or use '.' for whole diff. Examples: 'src', 'src/index/cache.ts'. Not glob, absolute path, or multi-scope." })),
 });
+
+const ShowParams = Type.Object({
+  search_id: Type.Optional(Type.String({ description: "Search ID from a previous semantic_search call. Required when using candidate_id." })),
+  candidate_id: Type.Optional(Type.Number({ description: "Candidate number (1-based) from the search results. Use with search_id." })),
+  target: Type.Optional(Type.String({ description: "Direct target path:line to show (e.g. 'src/index/cache.ts:154-259'). Alternative to search_id+candidate_id." })),
+  mode: Type.Optional(Type.String({ description: "Output mode: 'context' (default, with flow map and call neighborhood) or 'show' (raw code with context lines)." })),
+  scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the search's scope, or '.' if using direct target." })),
+});
+
 
 interface ThemeLike {
   fg(role: string, text: string): string;
@@ -29,13 +40,61 @@ interface ToolResultLike {
 }
 
 interface SemanticSearchDetails {
+  searchId?: string;
   query: string;
   scope: string;
   confidence: { abstained: boolean; level: string; reason: string };
-  candidates: Array<{ target: string; symbol?: string; score: number; source: string; kind: string }>;
+  candidates: Array<{ id?: number; target: string; symbol?: string; score: number; source: string; kind: string }>;
   cache?: { cacheKind: string; cacheHit: boolean; chunks: number; files: number; cacheLocation: string };
   truncated?: boolean;
   fullOutputPath?: string;
+}
+
+// === Search Registry (for semantic_show) ===
+interface CandidateRecord {
+  target: string;
+  symbol?: string;
+}
+
+interface SearchRecord {
+  repo: string;
+  scope: string;
+  candidates: CandidateRecord[];
+  createdAt: number;
+  lastAccess: number;
+}
+
+const recentSearches = new Map<string, SearchRecord>();
+const MAX_RECENT_SEARCHES = 25;
+const SEARCH_TTL_MS = 30 * 60 * 1000;
+const repoSearchSeq = new Map<string, number>();
+
+function repoKey(repo: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(path.resolve(repo))
+    .digest("hex")
+    .slice(0, 5);
+}
+
+function nextSearchId(repo: string): string {
+  const rk = repoKey(repo);
+  const next = (repoSearchSeq.get(rk) ?? 0) + 1;
+  repoSearchSeq.set(rk, next);
+  return `r${rk}-s${next.toString(36)}`;
+}
+
+function cleanupSearches(): void {
+  const now = Date.now();
+  for (const [id, record] of recentSearches) {
+    if (now - record.createdAt > SEARCH_TTL_MS) recentSearches.delete(id);
+  }
+  if (recentSearches.size > MAX_RECENT_SEARCHES) {
+    const sorted = [...recentSearches.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+    for (let i = 0; i < sorted.length - MAX_RECENT_SEARCHES; i++) {
+      recentSearches.delete(sorted[i]![0]);
+    }
+  }
 }
 
 type ReviewTarget = "staged" | "working-tree";
@@ -124,13 +183,34 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         detail: "normal",
         signal,
       });
-      const packet = formatResult(result, false);
+
+      // Generate search ID & store in registry
+      cleanupSearches();
+      const searchId = nextSearchId(ctx.cwd);
+      const candidatesWithIds = result.candidates.map((c, i) => ({
+        id: i + 1,
+        target: c.target,
+        symbol: c.symbol,
+        score: c.score,
+        source: c.source,
+        kind: c.kind,
+      }));
+      recentSearches.set(searchId, {
+        repo: ctx.cwd,
+        scope: result.plan.scope,
+        candidates: candidatesWithIds,
+        createdAt: Date.now(),
+        lastAccess: Date.now(),
+      });
+
+      const packet = `search_id: ${searchId}\n\n${formatResult(result, false)}`;
       const truncated = await truncateForTool(packet);
       const details: SemanticSearchDetails = {
+        searchId,
         query: result.plan.query,
         scope: result.plan.scope,
         confidence: { abstained: result.confidence.abstained, level: result.confidence.level, reason: result.confidence.reason },
-        candidates: result.candidates.map((c) => ({ target: c.target, symbol: c.symbol, score: c.score, source: c.source, kind: c.kind })),
+        candidates: candidatesWithIds,
         cache: result.cache ? { cacheKind: result.cache.cacheKind, cacheHit: result.cache.cacheHit, chunks: result.cache.chunks, files: result.cache.files, cacheLocation: result.cache.cacheLocation } : undefined,
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
@@ -146,7 +226,8 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (isPartial) return new Text(theme.fg("warning", "Searching srcwalk evidence..."), 0, 0);
       const details = result.details as SemanticSearchDetails | undefined;
       if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
-      let text = details.confidence.abstained ? theme.fg("warning", `abstained: ${details.confidence.reason}`) : theme.fg("success", `${details.candidates.length} candidate(s), ${details.confidence.level} confidence`);
+      let text = details.searchId ? theme.fg("dim", `${details.searchId} `) : "";
+      text += details.confidence.abstained ? theme.fg("warning", `abstained: ${details.confidence.reason}`) : theme.fg("success", `${details.candidates.length} candidate(s), ${details.confidence.level} confidence`);
       if (details.cache) text += theme.fg("dim", ` · cache ${details.cache.cacheHit ? "hit" : "built"} ${details.cache.chunks} chunks`);
       if (details.truncated) text += theme.fg("warning", " · truncated");
       if (expanded) {
@@ -210,6 +291,104 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (details.truncated) text += theme.fg("warning", " · truncated");
       if (expanded && details.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
       return new Text(text, 0, 0);
+    },
+  });
+
+  pi.registerTool({
+    name: "semantic_show",
+    label: "Semantic Show",
+    description: "Open and display a specific candidate from a previous semantic_search, or a direct target path:line. Shows structural context (flow map, callers, callees) by default, or raw code with surrounding lines.",
+    promptSnippet: "Show candidate code context with semantic_show",
+    promptGuidelines: [
+      "Use semantic_show after semantic_search to examine a specific candidate in detail without copying the target path manually.",
+      "Pass search_id and candidate_id from the search results to open the exact candidate.",
+      "Alternatively pass target directly (e.g. 'src/index/cache.ts:154-259') for a stateless show.",
+      "Default mode is 'context' which shows flow map, call neighborhood, and analysis. Use mode='show' for raw code lines.",
+    ],
+    parameters: ShowParams,
+    prepareArguments(args: unknown) {
+      if (!args || typeof args !== "object") return args;
+      const input = args as Record<string, unknown>;
+      return {
+        search_id: input.search_id,
+        candidate_id: input.candidate_id,
+        target: input.target,
+        mode: input.mode,
+        scope: input.scope,
+      };
+    },
+    async execute(_toolCallId: string, params: { search_id?: string; candidate_id?: number; target?: string; mode?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      // Resolve target from params
+      let target: string;
+      let scope: string;
+      let candidateInfo: string;
+      let repo = ctx.cwd;
+
+      if (params.target) {
+        // Stateless: target provided directly
+        target = params.target;
+        scope = params.scope?.trim() || ".";
+        candidateInfo = target;
+      } else if (params.search_id && params.candidate_id != null) {
+        // Stateful: lookup from registry
+        cleanupSearches();
+        const record = recentSearches.get(params.search_id);
+        if (!record) {
+          return { content: [{ type: "text", text: `semantic_show: search_id "${params.search_id}" not found or expired. Run semantic_search again or pass target directly.` }] };
+        }
+        // Repo safety check
+        if (path.resolve(record.repo) !== path.resolve(ctx.cwd)) {
+          return { content: [{ type: "text", text: `semantic_show: search_id "${params.search_id}" belongs to a different repo. Run semantic_search again in this repo or pass a direct target.` }] };
+        }
+        record.lastAccess = Date.now();
+        repo = record.repo;
+        const candidateIdx = params.candidate_id - 1;
+        const candidate = record.candidates[candidateIdx];
+        if (!candidate) {
+          return { content: [{ type: "text", text: `semantic_show: candidate_id ${params.candidate_id} out of range (1-${record.candidates.length}).` }] };
+        }
+        target = candidate.target;
+        scope = params.scope?.trim() || record.scope;
+        candidateInfo = `${candidate.target}${candidate.symbol ? ` ${candidate.symbol}` : ""}`;
+      } else {
+        return { content: [{ type: "text", text: "semantic_show: provide either (search_id + candidate_id) or target directly." }] };
+      }
+
+      const mode = params.mode === "show" ? "show" : "context";
+      onUpdate?.({ content: [{ type: "text", text: `Running semantic_show ${mode} for ${target}...` }] });
+
+      const command: SrcwalkCommand = mode === "show"
+        ? { label: `show:${target}`, args: ["srcwalk", "show", target, "-C", "12", "--budget", "5000"], purpose: "show candidate code", parseAs: "show" }
+        : { label: `context:${target}`, args: ["srcwalk", "context", target, "--scope", scope, "--budget", "5000"], purpose: "show candidate context", parseAs: "context" };
+
+      const result = await runCommand(repo, command, signal);
+
+      const header = [
+        `# semantic-show: ${candidateInfo}`,
+        `search_id: ${params.search_id ?? "-"} | candidate_id: ${params.candidate_id ?? "-"} | mode: ${mode}`,
+        `scope: ${scope}`,
+        "",
+      ].join("\n");
+
+      const packet = result.code === 0
+        ? header + result.output.trim()
+        : header + `(command failed code=${result.code})\n\n${result.output.trim()}`;
+
+      const truncated = await truncateForTool(packet);
+
+      return { content: [{ type: "text", text: truncated.text }] };
+    },
+    renderCall(args: { search_id?: string; candidate_id?: number; target?: string; mode?: string }, theme: ThemeLike) {
+      const label = args.target ?? (args.search_id ? `search:${args.search_id} candidate:${args.candidate_id}` : "");
+      let text = theme.fg("toolTitle", theme.bold("semantic_show ")) + theme.fg("accent", label);
+      if (args.mode) text += theme.fg("muted", ` (${args.mode})`);
+      return new Text(text, 0, 0);
+    },
+    renderResult(result: ToolResultLike, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: ThemeLike) {
+      if (isPartial) return new Text(theme.fg("warning", "Showing candidate..."), 0, 0);
+      const text = result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "";
+      const firstLine = text.split("\n")[0] ?? "";
+      return new Text(firstLine || text, 0, 0);
     },
   });
 }
