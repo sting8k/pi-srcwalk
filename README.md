@@ -156,7 +156,7 @@ Benchmark on Bifrost, Uno, Ghidra, and srcwalk repos: **16/16 Hit@1 core**, **10
 
 The TypeScript extension inherited the router, BM25/PRF, RRF, and confidence architecture from Python lab v9. Embedding was intentionally left out of TS v1 to keep the extension dependency-free.
 
-Python lab files are under `lab/python/`. Full reports are in `lab/reports/`.
+Python lab files and reports live on the `lab` branch.
 
 ---
 
@@ -174,9 +174,6 @@ pi-srcwalk/
 │   ├── srcwalk/                     # CLI runner + output parser
 │   ├── ranking/                     # RRF fusion + confidence
 │   └── output/                      # evidence formatting + truncation
-└── lab/
-    ├── python/router_lab_v*.py      # research prototypes (v3–v9)
-    └── reports/LAB_RESULTS_V*.md    # historical benchmarks
 ```
 
 ---
