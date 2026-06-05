@@ -7,6 +7,7 @@ import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 import { commandDisplay } from "../../src/router/intent.js";
 import { runCommand } from "../../src/srcwalk/runner.js";
+import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 
@@ -22,10 +23,18 @@ const ReviewParams = Type.Object({
 
 const ShowParams = Type.Object({
   search_id: Type.Optional(Type.String({ description: "Search ID from a previous semantic_search call. Required when using candidate_id." })),
-  candidate_id: Type.Optional(Type.Number({ description: "Candidate number (1-based) from the search results. Use with search_id." })),
-  target: Type.Optional(Type.String({ description: "Direct target path:line to show (e.g. 'src/index/cache.ts:154-259'). Alternative to search_id+candidate_id." })),
+  usage_id: Type.Optional(Type.String({ description: "Usage ID from a previous semantic_usages call. Alternative to search_id when using candidate_id." })),
+  candidate_id: Type.Optional(Type.Number({ description: "Candidate number (1-based) from the search results. Use with search_id or usage_id." })),
+  target: Type.Optional(Type.String({ description: "Direct target path:line to show (e.g. 'src/index/cache.ts:154-259'). Alternative to search_id/usage_id+candidate_id." })),
   mode: Type.Optional(Type.String({ description: "Output mode: 'context' (default, with flow map and call neighborhood) or 'show' (raw code with context lines)." })),
-  scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the search's scope, or '.' if using direct target." })),
+  scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the stored result scope, or '.' if using direct target." })),
+});
+
+const UsagesParams = Type.Object({
+  symbol: Type.String({ description: "Symbol name to find usages for (e.g. 'buildOrLoadIndex', 'executeSearch')." }),
+  relation: Type.Optional(Type.String({ description: "What to show: 'all' (default), 'callers', 'callees', or 'references'." })),
+  scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. File scopes are widened to their parent directory for callers/callees trace commands." })),
+  limit: Type.Optional(Type.Number({ description: "Max results per section (default: 20)." })),
 });
 
 
@@ -46,6 +55,17 @@ interface SemanticSearchDetails {
   confidence: { abstained: boolean; level: string; reason: string };
   candidates: Array<{ id?: number; target: string; symbol?: string; score: number; source: string; kind: string }>;
   cache?: { cacheKind: string; cacheHit: boolean; chunks: number; files: number; cacheLocation: string };
+  truncated?: boolean;
+  fullOutputPath?: string;
+}
+
+
+interface SemanticUsagesDetails {
+  usageId: string;
+  symbol: string;
+  relation: string;
+  scope: string;
+  candidates: Array<{ id?: number; target: string; symbol?: string }>;
   truncated?: boolean;
   fullOutputPath?: string;
 }
@@ -95,6 +115,104 @@ function cleanupSearches(): void {
       recentSearches.delete(sorted[i]![0]);
     }
   }
+}
+
+const usageSearchSeq = new Map<string, number>();
+
+function nextUsageId(repo: string): string {
+  const rk = repoKey(repo);
+  const next = (usageSearchSeq.get(rk) ?? 0) + 1;
+  usageSearchSeq.set(rk, next);
+  return `r${rk}-u${next.toString(36)}`;
+}
+
+const USAGES_TARGET_RE = /[\w./-]+\.\w+:\d+(?:-\d+)?/g;
+const USAGES_GROUP_FILE_RE = /^(?:#+\s*)?(?<file>[\w./-]+\.\w+)\s+\[\d+\s+(?:usages?|matches?)\]/;
+const USAGES_GROUP_LINE_RE = /^(?:-\s*)?(?:\[[^\]]+\]\s*)?:(?<range>\d+(?:-\d+)?)(?:\s|$)/;
+
+function addUsageTarget(targets: string[], seen: Set<string>, target: string): void {
+  if (seen.has(target)) return;
+  seen.add(target);
+  targets.push(target);
+}
+
+function parseUsagesTargets(output: string): string[] {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  let currentFile: string | undefined;
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    for (const m of line.matchAll(USAGES_TARGET_RE)) addUsageTarget(targets, seen, m[0]);
+
+    const group = line.match(USAGES_GROUP_FILE_RE);
+    if (group?.groups?.file) {
+      currentFile = group.groups.file;
+      continue;
+    }
+
+    const groupedLine = currentFile ? line.match(USAGES_GROUP_LINE_RE) : undefined;
+    if (groupedLine?.groups?.range) addUsageTarget(targets, seen, `${currentFile}:${groupedLine.groups.range}`);
+  }
+  return targets;
+}
+
+function usagesNeedsTrace(relation: string): boolean {
+  return relation === "all" || relation === "callers" || relation === "callees";
+}
+
+function isFileScope(repo: string, scope: string): boolean {
+  if (scope === ".") return false;
+  try {
+    return fs.statSync(path.resolve(repo, scope)).isFile();
+  } catch {
+    return Boolean(path.extname(scope));
+  }
+}
+
+function parentScope(scope: string): string {
+  const parent = path.dirname(scope);
+  return parent === "." ? "." : parent;
+}
+
+function traceScopeForUsages(repo: string, scope: string, relation: string): string {
+  return usagesNeedsTrace(relation) && isFileScope(repo, scope) ? parentScope(scope) : scope;
+}
+
+function usagesCommands(symbol: string, relation: string, scope: string, traceScope: string, limit: number): SrcwalkCommand[] {
+  const cmds: SrcwalkCommand[] = [];
+  if (relation === "all" || relation === "callers") {
+    cmds.push({ label: `trace-callers:${symbol}`, args: ["srcwalk", "trace", "callers", symbol, "--scope", traceScope, "--limit", String(limit), "--budget", "5000"], purpose: "trace callers", parseAs: "trace" });
+  }
+  if (relation === "all" || relation === "callees") {
+    cmds.push({ label: `trace-callees:${symbol}`, args: ["srcwalk", "trace", "callees", symbol, "--scope", traceScope, "--detailed", "--budget", "5000"], purpose: "trace callees", parseAs: "trace" });
+  }
+  if (relation === "all" || relation === "references") {
+    cmds.push({ label: `discover:${symbol}`, args: ["srcwalk", "discover", symbol, "--as", "symbol", "--scope", scope, "--limit", String(limit), "--budget", "5000"], purpose: "discover references", parseAs: "discover" });
+  }
+  return cmds;
+}
+
+function formatUsagesPacket(repo: string, symbol: string, relation: string, scope: string, traceScope: string, results: Array<{ code: number; output: string; command: SrcwalkCommand }>): string {
+  const sections = [`# semantic-usages: ${symbol}`, `repo: ${repo}`, `relation: ${relation}`, `scope: ${scope}`];
+  if (traceScope !== scope) sections.push(`trace_scope: ${traceScope} (file scope adjusted for callers/callees)`);
+  sections.push("");
+  for (const r of results) {
+    const label = r.command.label;
+    const isCallers = label.startsWith("trace-callers");
+    const isCallees = label.startsWith("trace-callees");
+    const section = isCallers ? "Callers" : isCallees ? "Callees" : "References";
+    sections.push(`## ${section}`);
+    const out = r.output.trim();
+    if (r.code !== 0) {
+      sections.push(`(command failed code=${r.code})`);
+    } else if (out) {
+      sections.push(out);
+    } else {
+      sections.push("(none)");
+    }
+    sections.push("");
+  }
+  return sections.join("\n");
 }
 
 type ReviewTarget = "staged" | "working-tree";
@@ -239,6 +357,99 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "semantic_usages",
+    label: "Semantic Usages",
+    description: "Show callers, callees, and references for a specific symbol using srcwalk trace and discover commands.",
+    promptSnippet: "Show symbol usages with semantic_usages",
+    promptGuidelines: [
+      "Use semantic_usages when you already know the symbol name and need to see who calls it, what it calls, or where it's referenced.",
+      "Default relation='all' shows callers, callees (detailed), and references in one concise response.",
+      "Use relation='callers', 'callees', or 'references' to focus on one aspect.",
+      "Results include targets that can be opened with semantic_show using usage_id + candidate_id.",
+    ],
+    parameters: UsagesParams,
+    prepareArguments(args: unknown) {
+      if (!args || typeof args !== "object") return args;
+      const input = args as Record<string, unknown>;
+      return {
+        symbol: input.symbol,
+        relation: input.relation,
+        scope: input.scope,
+        limit: input.limit,
+      };
+    },
+    async execute(_toolCallId: string, params: { symbol: string; relation?: string; scope?: string; limit?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const symbol = params.symbol;
+      const relation = params.relation ?? "all";
+      const scope = params.scope?.trim() || ".";
+      const limit = Math.max(1, Math.min(params.limit ?? 20, 50));
+      onUpdate?.({ content: [{ type: "text", text: `Running semantic_usages for ${symbol} (${relation})...` }] });
+
+      if (!["all", "callers", "callees", "references"].includes(relation)) {
+        return { content: [{ type: "text", text: `semantic_usages: relation must be 'all', 'callers', 'callees', or 'references', got '${relation}'.` }] };
+      }
+
+      const traceScope = traceScopeForUsages(ctx.cwd, scope, relation);
+      const commands = usagesCommands(symbol, relation, scope, traceScope, limit);
+      const results: Array<{ code: number; output: string; command: SrcwalkCommand }> = [];
+      for (const cmd of commands) {
+        const result = await runCommand(ctx.cwd, cmd, signal);
+        results.push(result);
+      }
+
+      // Build registry entry for semantic_show
+      cleanupSearches();
+      const usageId = nextUsageId(ctx.cwd);
+      const allTargets = new Set<string>();
+      const allCandidates: Array<{ id: number; target: string; symbol?: string }> = [];
+      for (const r of results) {
+        for (const t of parseUsagesTargets(r.output)) {
+          if (!allTargets.has(t)) {
+            allTargets.add(t);
+            allCandidates.push({ id: allCandidates.length + 1, target: t, symbol });
+          }
+        }
+      }
+      recentSearches.set(usageId, {
+        repo: ctx.cwd,
+        scope: traceScope,
+        candidates: allCandidates,
+        createdAt: Date.now(),
+        lastAccess: Date.now(),
+      });
+
+      const packet = `usage_id: ${usageId}\n\n${formatUsagesPacket(ctx.cwd, symbol, relation, scope, traceScope, results)}`;
+      const truncated = await truncateForTool(packet);
+      const details: SemanticUsagesDetails = {
+        usageId,
+        symbol,
+        relation,
+        scope,
+        candidates: allCandidates,
+        truncated: truncated.truncated,
+        fullOutputPath: truncated.fullOutputPath,
+      };
+      return { content: [{ type: "text", text: truncated.text }], details };
+    },
+    renderCall(args: { symbol?: string; relation?: string; scope?: string }, theme: ThemeLike) {
+      let text = theme.fg("toolTitle", theme.bold("semantic_usages ")) + theme.fg("accent", args.symbol ?? "");
+      if (args.relation && args.relation !== "all") text += theme.fg("muted", ` (${args.relation})`);
+      if (args.scope) text += theme.fg("muted", ` in ${args.scope}`);
+      return new Text(text, 0, 0);
+    },
+    renderResult(result: ToolResultLike, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: ThemeLike) {
+      if (isPartial) return new Text(theme.fg("warning", "Looking up usages..."), 0, 0);
+      const details = result.details as SemanticUsagesDetails | undefined;
+      if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
+      let text = theme.fg("dim", `${details.usageId} `) + theme.fg("accent", details.symbol) + theme.fg("dim", ` · ${details.relation}`);
+      if (details.candidates.length) text += theme.fg("dim", ` · ${details.candidates.length} targets`);
+      if (details.truncated) text += theme.fg("warning", " · truncated");
+      if (expanded && details.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
+      return new Text(text, 0, 0);
+    },
+  });
+
+  pi.registerTool({
     name: "semantic_review",
     label: "Semantic Review",
     description: "Review current code changes with srcwalk. Use for staged diffs, working-tree changes, patch risk, or change summaries; returns bounded review evidence and changed-symbol context.",
@@ -301,7 +512,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     promptSnippet: "Show candidate code context with semantic_show",
     promptGuidelines: [
       "Use semantic_show after semantic_search to examine a specific candidate in detail without copying the target path manually.",
-      "Pass search_id and candidate_id from the search results to open the exact candidate.",
+      "Pass search_id/usage_id and candidate_id from prior results to open the exact candidate.",
       "Alternatively pass target directly (e.g. 'src/index/cache.ts:154-259') for a stateless show.",
       "Default mode is 'context' which shows flow map, call neighborhood, and analysis. Use mode='show' for raw code lines.",
     ],
@@ -311,34 +522,36 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       const input = args as Record<string, unknown>;
       return {
         search_id: input.search_id,
+        usage_id: input.usage_id,
         candidate_id: input.candidate_id,
         target: input.target,
         mode: input.mode,
         scope: input.scope,
       };
     },
-    async execute(_toolCallId: string, params: { search_id?: string; candidate_id?: number; target?: string; mode?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+    async execute(_toolCallId: string, params: { search_id?: string; usage_id?: string; candidate_id?: number; target?: string; mode?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       // Resolve target from params
       let target: string;
       let scope: string;
       let candidateInfo: string;
       let repo = ctx.cwd;
+      const registryId = params.search_id ?? params.usage_id;
 
       if (params.target) {
         // Stateless: target provided directly
         target = params.target;
         scope = params.scope?.trim() || ".";
         candidateInfo = target;
-      } else if (params.search_id && params.candidate_id != null) {
+      } else if (registryId && params.candidate_id != null) {
         // Stateful: lookup from registry
         cleanupSearches();
-        const record = recentSearches.get(params.search_id);
+        const record = recentSearches.get(registryId);
         if (!record) {
-          return { content: [{ type: "text", text: `semantic_show: search_id "${params.search_id}" not found or expired. Run semantic_search again or pass target directly.` }] };
+          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" not found or expired. Run semantic_search/semantic_usages again or pass target directly.` }] };
         }
         // Repo safety check
         if (path.resolve(record.repo) !== path.resolve(ctx.cwd)) {
-          return { content: [{ type: "text", text: `semantic_show: search_id "${params.search_id}" belongs to a different repo. Run semantic_search again in this repo or pass a direct target.` }] };
+          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" belongs to a different repo. Run semantic_search/semantic_usages again in this repo or pass a direct target.` }] };
         }
         record.lastAccess = Date.now();
         repo = record.repo;
@@ -351,7 +564,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         scope = params.scope?.trim() || record.scope;
         candidateInfo = `${candidate.target}${candidate.symbol ? ` ${candidate.symbol}` : ""}`;
       } else {
-        return { content: [{ type: "text", text: "semantic_show: provide either (search_id + candidate_id) or target directly." }] };
+        return { content: [{ type: "text", text: "semantic_show: provide either (search_id/usage_id + candidate_id) or target directly." }] };
       }
 
       const mode = params.mode === "show" ? "show" : "context";
@@ -365,7 +578,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
       const header = [
         `# semantic-show: ${candidateInfo}`,
-        `search_id: ${params.search_id ?? "-"} | candidate_id: ${params.candidate_id ?? "-"} | mode: ${mode}`,
+        `search_id: ${params.search_id ?? "-"} | usage_id: ${params.usage_id ?? "-"} | candidate_id: ${params.candidate_id ?? "-"} | mode: ${mode}`,
         `scope: ${scope}`,
         "",
       ].join("\n");
@@ -378,8 +591,9 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
       return { content: [{ type: "text", text: truncated.text }] };
     },
-    renderCall(args: { search_id?: string; candidate_id?: number; target?: string; mode?: string }, theme: ThemeLike) {
-      const label = args.target ?? (args.search_id ? `search:${args.search_id} candidate:${args.candidate_id}` : "");
+    renderCall(args: { search_id?: string; usage_id?: string; candidate_id?: number; target?: string; mode?: string }, theme: ThemeLike) {
+      const registryId = args.search_id ?? args.usage_id;
+      const label = args.target ?? (registryId ? `id:${registryId} candidate:${args.candidate_id}` : "");
       let text = theme.fg("toolTitle", theme.bold("semantic_show ")) + theme.fg("accent", label);
       if (args.mode) text += theme.fg("muted", ` (${args.mode})`);
       return new Text(text, 0, 0);

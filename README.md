@@ -2,11 +2,12 @@
 
 Code evidence tools for AI coding agents — built on [`srcwalk`](https://github.com/sting8k/srcwalk).
 
-Three agent-facing tools:
+Four agent-facing tools:
 
 - **`semantic_search`** — find existing code evidence: symbols, files, callers, deps, overviews, tests, and natural-language questions.
 - **`semantic_review`** — review staged or working-tree changes with diff evidence and risk hints.
 - **`semantic_show`** — open a specific candidate from a previous search, or a direct target `path:line`, showing its structural context (flow map, callers, callees) or raw code.
+- **`semantic_usages`** — show callers, callees, and references for a specific symbol using srcwalk trace and discover commands.
 
 No Python runtime. Pure TypeScript. Ships as a [Pi](https://github.com/earendil-works/pi) extension package.
 
@@ -22,7 +23,7 @@ pi -e ./extensions/pi-srcwalk/index.ts
 pi install ./path/to/pi-srcwalk
 ```
 
-After `/reload` in Pi, all three tools become available.
+After `/reload` in Pi, all four tools become available.
 
 ---
 
@@ -78,6 +79,7 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 ```ts
 semantic_show({
   search_id?: string,  // from a previous semantic_search
+  usage_id?: string,   // from a previous semantic_usages
   candidate_id?: number,
   target?: string,     // alternative: direct path:line
   mode?: string,       // "context" (default) or "show"
@@ -88,6 +90,7 @@ semantic_show({
 What it does:
 
 - Opens a specific candidate from a previous `semantic_search` by `search_id + candidate_id` without manually copying the target path.
+- Opens a specific target from `semantic_usages` by `usage_id + candidate_id`.
 - Also accepts a direct `target` (`path:line`) for stateless usage without a prior search.
 - Default mode `"context"` shows structural analysis: flow map, call neighborhood, callees, and callers.
 - Mode `"show"` shows raw code with surrounding context lines.
@@ -98,8 +101,40 @@ semantic_search({ query: "buildOrLoadIndex" })
 // → returns search_id: "r595b4-s1", candidates: [...]
 semantic_show({ search_id: "r595b4-s1", candidate_id: 1 })
 
+// Example: open candidate #1 from previous usages lookup
+semantic_usages({ symbol: "buildOrLoadIndex" })
+// → returns usage_id: "r595b4-u1", candidates: [...]
+semantic_show({ usage_id: "r595b4-u1", candidate_id: 1 })
+
 // Stateless: directly show target
 semantic_show({ target: "src/index/cache.ts:154-259", mode: "show" })
+```
+
+### `semantic_usages`
+
+```ts
+semantic_usages({
+  symbol: string,
+  relation?: "all" | "callers" | "callees" | "references",
+  scope?: string,
+  limit?: number,
+})
+```
+
+What it does:
+
+- Shows callers, callees, and references for a specific symbol in one concise response.
+- Default `relation: "all"` runs all three. Use `relation: "callers"` to focus on one aspect.
+- Callees always include detailed call sites (ordered, with args).
+- Results include `usage_id` so targets can be opened with `semantic_show`.
+
+```ts
+// Example: all usages of a symbol
+semantic_usages({ symbol: "executeSearch" })
+// → usage_id: "r595b4-u1", callers: 2, callees: 10, references: 5
+
+// Focus on one relation
+semantic_usages({ symbol: "buildOrLoadIndex", relation: "callers" })
 ```
 
 ---
@@ -111,7 +146,8 @@ semantic_show({ target: "src/index/cache.ts:154-259", mode: "show" })
 │                         Agent (Pi)                          │
 │  semantic_search(query, scope?)                             │
 │  semantic_review({ target?, scope? })                       │
-│  semantic_show({ search_id?, candidate_id?, target?, mode? })│
+│  semantic_show({ search_id?, usage_id?, candidate_id? })     │
+│  semantic_usages({ symbol, relation?, scope? })              │
 └─────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -131,6 +167,12 @@ semantic_show({ target: "src/index/cache.ts:154-259", mode: "show" })
 │    expand evidence → context/show/trace/deps/assess         │
 │    format search packet → truncate 50KB                     │
 │                                                             │
+│  Usage lane                                                 │
+│    symbol → trace callers/callees + discover references     │
+│    detailed callees by default                             │
+│    usage_id registry → semantic_show targets                │
+│    format usage packet → truncate 50KB                      │
+│                                                             │
 │  Review lane                                                │
 │    default target → srcwalk review --staged                 │
 │    working-tree target → srcwalk review                     │
@@ -144,6 +186,7 @@ semantic_show({ target: "src/index/cache.ts:154-259", mode: "show" })
 │  search output: candidates + confidence + evidence          │
 │  review output: changed evidence + diff stats               │
 │  show output: context packet or raw code                     │
+│  usage output: callers + callees + references + usage_id     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -197,7 +240,7 @@ Python lab files and reports live on the `lab` branch.
 ```text
 pi-srcwalk/
 ├── package.json                     # Pi package manifest
-├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (3 tools)
+├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (4 tools)
 ├── src/                             # TS-native runtime engine
 │   ├── engine.ts                    # semantic_search orchestration
 │   ├── cli.ts                       # dev smoke-test CLI
