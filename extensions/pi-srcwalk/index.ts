@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 const SearchParams = Type.Object({
-  query: Type.String({ description: "What to find: a question, symbol, file path, path:line, callers/callees/deps request, overview, or test search." }),
+  query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_usages for known-symbol callers/callees/references." }),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'. Not glob, symbol, path:line, absolute path, or multi-scope." })),
 });
 
@@ -22,16 +22,16 @@ const ReviewParams = Type.Object({
 });
 
 const ShowParams = Type.Object({
-  search_id: Type.Optional(Type.String({ description: "Search ID from a previous semantic_search call. Required when using candidate_id." })),
-  usage_id: Type.Optional(Type.String({ description: "Usage ID from a previous semantic_usages call. Alternative to search_id when using candidate_id." })),
-  candidate_id: Type.Optional(Type.Number({ description: "Candidate number (1-based) from the search results. Use with search_id or usage_id." })),
-  target: Type.Optional(Type.String({ description: "Direct target path:line to show (e.g. 'src/index/cache.ts:154-259'). Alternative to search_id/usage_id+candidate_id." })),
+  search_id: Type.Optional(Type.String({ description: "ID from semantic_search. Use with candidate_id." })),
+  usage_id: Type.Optional(Type.String({ description: "ID from semantic_usages. Use with candidate_id." })),
+  candidate_id: Type.Optional(Type.Number({ description: "1-based candidate number from semantic_search or semantic_usages." })),
+  target: Type.Optional(Type.String({ description: "Direct path:line target, e.g. 'src/index/cache.ts:154-259'. Stateless alternative to id+candidate_id." })),
   mode: Type.Optional(Type.String({ description: "Output mode: 'context' (default, with flow map and call neighborhood) or 'show' (raw code with context lines)." })),
   scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the stored result scope, or '.' if using direct target." })),
 });
 
 const UsagesParams = Type.Object({
-  symbol: Type.String({ description: "Symbol name to find usages for (e.g. 'buildOrLoadIndex', 'executeSearch')." }),
+  symbol: Type.String({ description: "Exact symbol name, not natural language (e.g. 'buildOrLoadIndex')." }),
   relation: Type.Optional(Type.String({ description: "What to show: 'all' (default), 'callers', 'callees', or 'references'." })),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. File scopes are widened to their parent directory for callers/callees trace commands." })),
   limit: Type.Optional(Type.Number({ description: "Max results per section (default: 20)." })),
@@ -277,13 +277,13 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_search",
     label: "Semantic Search",
-    description: "Find relevant code evidence in the current repo. Handles natural-language, symbol, file, caller/callee, dependency, overview, and test queries; returns ranked candidates, retrieval confidence, and bounded srcwalk evidence.",
-    promptSnippet: "Find ranked code evidence with srcwalk-backed semantic_search",
+    description: "Discover ranked code evidence when the exact target is unknown: natural-language questions, files, symbols, overviews, deps, and tests.",
+    promptSnippet: "Discover ranked code evidence with semantic_search",
     promptGuidelines: [
-      "Use semantic_search first for code discovery or navigation questions, including where code lives, how an implementation works, who calls a symbol, dependencies, overviews, tests, or relevant files.",
-      "Call semantic_search with query only by default. Set scope only to one repo-relative directory/file when the user or prior evidence identifies it; put symbols and path:line targets in query, not scope.",
-      "Treat Retrieval confidence as confidence in candidate selection. If it is medium/low or abstained=true, narrow scope or verify with returned evidence before claiming an answer.",
-      "Use returned targets as bounded evidence. Read exact files or ranges before editing or making detailed code claims.",
+      "Use semantic_search for discovery when the target or symbol is unknown or ambiguous.",
+      "Prefer semantic_usages when the user names a concrete symbol and asks for callers, callees, or references.",
+      "Set scope only to one repo-relative dir/file when known; put symbols and path:line targets in query.",
+      "Treat confidence and returned targets as bounded evidence; verify exact ranges before detailed claims or edits.",
     ],
     parameters: SearchParams,
     prepareArguments(args: unknown) {
@@ -359,13 +359,14 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_usages",
     label: "Semantic Usages",
-    description: "Show callers, callees, and references for a specific symbol using srcwalk trace and discover commands.",
-    promptSnippet: "Show symbol usages with semantic_usages",
+    description: "Show callers, detailed callees, and references for a known symbol.",
+    promptSnippet: "Show callers/callees/references for a known symbol",
     promptGuidelines: [
-      "Use semantic_usages when you already know the symbol name and need to see who calls it, what it calls, or where it's referenced.",
-      "Default relation='all' shows callers, callees (detailed), and references in one concise response.",
-      "Use relation='callers', 'callees', or 'references' to focus on one aspect.",
-      "Results include targets that can be opened with semantic_show using usage_id + candidate_id.",
+      "Use semantic_usages only when the symbol name is known.",
+      "Default relation='all' shows callers, detailed callees, and references.",
+      "Use relation='callers', 'callees', or 'references' to narrow output.",
+      "Use semantic_search first for ambiguous names or natural-language discovery.",
+      "Open returned targets with semantic_show using usage_id + candidate_id.",
     ],
     parameters: UsagesParams,
     prepareArguments(args: unknown) {
@@ -452,13 +453,13 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_review",
     label: "Semantic Review",
-    description: "Review current code changes with srcwalk. Use for staged diffs, working-tree changes, patch risk, or change summaries; returns bounded review evidence and changed-symbol context.",
-    promptSnippet: "Review current code changes with srcwalk-backed semantic_review",
+    description: "Review staged or working-tree changes with srcwalk diff evidence and risk hints.",
+    promptSnippet: "Review current code changes with semantic_review",
     promptGuidelines: [
-      "Use semantic_review instead of semantic_search when the user asks to review, check, summarize, or assess current changes, staged files, diffs, patches, or change risk.",
-      "Call semantic_review with no arguments by default to review staged changes. Use target='working-tree' only when the user asks about unstaged/current working tree changes.",
-      "Use semantic_search for finding existing code; use semantic_review for evaluating changed code.",
-      "Treat semantic_review output as bounded diff evidence; read exact changed files or ranges before making detailed fix claims.",
+      "Use semantic_review for review, check, summarize, or assess current changes, diffs, patches, or risk.",
+      "Default is staged changes; use target='working-tree' only for unstaged/current working-tree changes.",
+      "Use semantic_search or semantic_usages for existing-code discovery; use semantic_review for changed-code evidence.",
+      "Treat output as bounded diff evidence; read exact ranges before detailed fix claims.",
     ],
     parameters: ReviewParams,
     prepareArguments(args: unknown) {
@@ -508,13 +509,12 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_show",
     label: "Semantic Show",
-    description: "Open and display a specific candidate from a previous semantic_search, or a direct target path:line. Shows structural context (flow map, callers, callees) by default, or raw code with surrounding lines.",
-    promptSnippet: "Show candidate code context with semantic_show",
+    description: "Open a candidate from semantic_search/semantic_usages, or a direct path:line target. Default context mode shows flow/call context; show mode shows raw code.",
+    promptSnippet: "Open code context with semantic_show",
     promptGuidelines: [
-      "Use semantic_show after semantic_search to examine a specific candidate in detail without copying the target path manually.",
-      "Pass search_id/usage_id and candidate_id from prior results to open the exact candidate.",
-      "Alternatively pass target directly (e.g. 'src/index/cache.ts:154-259') for a stateless show.",
-      "Default mode is 'context' which shows flow map, call neighborhood, and analysis. Use mode='show' for raw code lines.",
+      "Use semantic_show after semantic_search or semantic_usages to inspect one candidate.",
+      "Pass search_id/usage_id + candidate_id, or pass target directly for stateless use.",
+      "Default mode='context' gives flow/call context; use mode='show' for raw code.",
     ],
     parameters: ShowParams,
     prepareArguments(args: unknown) {
