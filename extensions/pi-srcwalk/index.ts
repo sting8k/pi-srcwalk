@@ -10,12 +10,12 @@ import { runCommand } from "../../src/srcwalk/runner.js";
 
 const SearchParams = Type.Object({
   query: Type.String({ description: "What to find: a question, symbol, file path, path:line, callers/callees/deps request, overview, or test search." }),
-  scope: Type.Optional(Type.String({ description: "Optional scope to search when the user or prior evidence identifies a module/path. Omit by default." })),
+  scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'. Not glob, symbol, path:line, absolute path, or multi-scope." })),
 });
 
 const ReviewParams = Type.Object({
   target: Type.Optional(Type.String({ description: "Changes to review: 'staged' (default) or 'working-tree'." })),
-  scope: Type.Optional(Type.String({ description: "Optional scope to limit changed evidence when reviewing a large diff." })),
+  scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit review evidence; omit or use '.' for whole diff. Examples: 'src', 'src/index/cache.ts'. Not glob, absolute path, or multi-scope." })),
 });
 
 interface ThemeLike {
@@ -104,7 +104,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     promptSnippet: "Find ranked code evidence with srcwalk-backed semantic_search",
     promptGuidelines: [
       "Use semantic_search first for code discovery or navigation questions, including where code lives, how an implementation works, who calls a symbol, dependencies, overviews, tests, or relevant files.",
-      "Call semantic_search with query only by default. Set scope only when the user names a repo subdirectory or prior evidence identifies the module to inspect.",
+      "Call semantic_search with query only by default. Set scope only to one repo-relative directory/file when the user or prior evidence identifies it; put symbols and path:line targets in query, not scope.",
       "Treat Retrieval confidence as confidence in candidate selection. If it is medium/low or abstained=true, narrow scope or verify with returned evidence before claiming an answer.",
       "Use returned targets as bounded evidence. Read exact files or ranges before editing or making detailed code claims.",
     ],
