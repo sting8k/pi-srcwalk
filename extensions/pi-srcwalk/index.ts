@@ -30,6 +30,10 @@ const ShowParams = Type.Object({
   scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the stored result scope, or '.' if using direct target." })),
 });
 
+// === before_agent_start sentinels ===
+const SENTINEL_START = "<!-- pi-srcwalk:tools-rules:start -->";
+const SENTINEL_END   = "<!-- pi-srcwalk:tools-rules:end -->";
+
 const InspectParams = Type.Object({
   symbol: Type.String({ description: "Exact symbol name, not natural language (e.g. 'buildOrLoadIndex')." }),
   relation: Type.Optional(Type.String({ description: "What to show: 'all' (default), 'callers', 'callees', or 'references'." })),
@@ -604,5 +608,53 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       const firstLine = text.split("\n")[0] ?? "";
       return new Text(firstLine || text, 0, 0);
     },
+  });
+
+  // Cast: ExtensionAPI type lacks on() — provided at runtime by Pi
+  const piEvents = pi as unknown as { on(event: string, handler: (event: { systemPrompt: string }) => any): void };
+  // === before_agent_start: inject semantic_* contract into system prompt ===
+  piEvents.on("before_agent_start", async (event) => {
+    const block = [
+      SENTINEL_START,
+      "",
+      "## Tools — semantic_* contract",
+      "",
+      "Default to `semantic_*` first for code-structure work.",
+      "`read`/`glob`/`grep` only for raw-text confirmation or when",
+      "semantic_* lacks support. If you bypass them, say why.",
+      "",
+      "### Contract",
+      "",
+      "1. **semantic_search** — unknown target: NL query, symbol, file,",
+      "   overview, deps, tests.",
+      "2. **semantic_inspect** — known symbol: callers / callees / references.",
+      "3. **semantic_show** — open exact code: search/inspect_id + candidate,",
+      "   or direct path:line. mode: context (flow) | show (raw).",
+      "4. **semantic_review** — verify changes. staged (default) | working-tree.",
+      "5. Respect confidence: `abstained: true` → no strong match. Don't fabricate.",
+      "6. Follow search/inspect IDs. Don't retype paths from output.",
+      "7. If you bypass semantic_* for a code claim, say why.",
+      "",
+      "### Before read/find/grep",
+      "",
+      "- `ls`/`tree`/`find` → `semantic_search`",
+      "- `grep \"symbol\"` → `semantic_search` or `semantic_inspect`",
+      "- Blind `read` → `semantic_show` with search/inspect_id + candidate",
+      "",
+      SENTINEL_END,
+    ].join("\n");
+
+    const startIdx = event.systemPrompt.indexOf(SENTINEL_START);
+    const endIdx = event.systemPrompt.indexOf(SENTINEL_END);
+    if (startIdx !== -1 && endIdx !== -1) {
+      return {
+        systemPrompt:
+          event.systemPrompt.slice(0, startIdx) + block +
+          event.systemPrompt.slice(endIdx + SENTINEL_END.length),
+      };
+    }
+    return {
+      systemPrompt: event.systemPrompt + "\n" + block
+    };
   });
 }
