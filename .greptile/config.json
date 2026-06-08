@@ -1,0 +1,52 @@
+{
+  "strictness": 3,
+  "commentTypes": [
+    "logic",
+    "syntax"
+  ],
+  "fileChangeLimit": 200,
+  "triggerOnUpdates": true,
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "updateExistingSummaryComment": true,
+  "ignorePatterns": "node_modules/**\ndist/**\ncoverage/**\n.tmp*/**\n**/*.generated.*\npackage-lock.json",
+  "excludeAuthors": [
+    "github-actions[bot]",
+    "dependabot[bot]"
+  ],
+  "ignoreKeywords": "release:\nwip:",
+  "disabledLabels": [
+    "no-greptile",
+    "wip"
+  ],
+  "instructions": "Prioritize clear correctness bugs, runtime errors, agent/tool contract regressions, TypeScript schema mismatches, srcwalk command behavior, bounded output, registry/id handoff, path/platform handling, and npm release workflow safety. Avoid speculative edge cases, style nits, and broad refactor suggestions.",
+  "rules": [
+    {
+      "id": "bounded-agent-output",
+      "rule": "Tool output shown to agents should stay bounded and use truncation/registry handoff instead of dumping large source or command output, except for explicit semantic_show source reads.",
+      "severity": "medium",
+      "scope": [
+        "extensions/**/*.ts",
+        "src/**/*.ts"
+      ]
+    },
+    {
+      "id": "tool-contract-alignment",
+      "rule": "Tool parameter schemas, descriptions, injected prompt contract, README examples, and implementation behavior should stay aligned.",
+      "severity": "medium",
+      "scope": [
+        "extensions/**/*.ts",
+        "README.md"
+      ]
+    },
+    {
+      "id": "release-workflow-safety",
+      "rule": "Release workflow changes should preserve tag-only publishing, minimal permissions, version checks, npm provenance/trusted publishing, and safe skip behavior for already-published versions.",
+      "severity": "medium",
+      "scope": [
+        ".github/workflows/**/*.yml",
+        "package.json"
+      ]
+    }
+  ]
+}
