@@ -4,7 +4,7 @@ on:
   push:
     tags: ["v*"]
 
-# Read-only by default. Publish job opts into OIDC for npm provenance.
+# Read-only by default. Jobs opt into OIDC or write access only when needed.
 permissions:
   contents: read
 
@@ -82,3 +82,31 @@ jobs:
       - name: Publish to npm
         if: steps.npm-version.outputs.exists != 'true'
         run: npm publish --access public --provenance
+
+  create-github-release:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create GitHub release
+    steps:
+      - name: Create GitHub release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub release $GITHUB_REF_NAME already exists; skipping."
+            exit 0
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > release-notes.md <<EOF
+          Release $GITHUB_REF_NAME.
+
+          npm: https://www.npmjs.com/package/@sting8k/pi-srcwalk/v/$VERSION
+          EOF
+
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
