@@ -1,21 +1,48 @@
 {
-  "name": "pi-srcwalk",
-  "version": "0.1.0",
-  "description": "TS-native srcwalk evidence search extension for Pi coding agent",
+  "name": "@sting8k/pi-srcwalk",
+  "version": "1.0.0",
+  "description": "Agent-friendly srcwalk wrapper for Pi coding agents",
   "type": "module",
-  "keywords": ["pi-package", "srcwalk", "coding-agent", "semantic-search"],
+  "main": "extensions/pi-srcwalk/index.ts",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "srcwalk",
+    "code-intelligence",
+    "semantic-search"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sting8k/pi-srcwalk.git"
+  },
+  "homepage": "https://github.com/sting8k/pi-srcwalk",
+  "bugs": {
+    "url": "https://github.com/sting8k/pi-srcwalk/issues"
+  },
+  "author": "sting8k",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "README.md",
+    "extensions/",
+    "src/",
+    "tsconfig.json"
+  ],
   "pi": {
-    "extensions": ["./extensions/pi-srcwalk/index.ts"]
+    "extensions": [
+      "./extensions/pi-srcwalk/index.ts"
+    ]
   },
   "scripts": {
     "check:ts": "tsc --noEmit",
     "smoke": "node --loader ts-node/esm src/cli.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": ">=0.74.0 <1.0.0",
+    "@earendil-works/pi-tui": ">=0.74.0 <1.0.0",
+    "typebox": ">=1.1.24 <2.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default. Publish job opts into OIDC for npm provenance.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify package version matches tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG_VER=$(node -p "require('./package.json').version")
+          echo "Tag: $TAG  package.json: $PKG_VER"
+          if [ "$PKG_VER" != "$TAG" ]; then
+            echo "::error::package.json version ($PKG_VER) does not match tag ($TAG)"
+            exit 1
+          fi
+
+  publish-npm:
+    needs: version-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing / provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Check existing npm version
+        id: npm-version
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$PKG@$VERSION already exists on npm; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm ci --legacy-peer-deps
+
+      - name: Security audit
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: TypeScript check
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm run check:ts
+
+      - name: Pack dry run
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm publish --access public --provenance
