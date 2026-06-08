@@ -36,11 +36,11 @@ No Python runtime. Pure TypeScript. Ships as a [Pi](https://github.com/earendil-
 ## Quick start
 
 ```bash
-# Load the extension locally in Pi
-pi -e ./extensions/pi-srcwalk/index.ts
+# Install from npm
+pi install npm:@sting8k/pi-srcwalk
 
-# Or install as a package once published
-pi install ./path/to/pi-srcwalk
+# Or load the local checkout during development
+pi -e ./extensions/pi-srcwalk/index.ts
 ```
 
 After `/reload` in Pi, all four tools become available.
