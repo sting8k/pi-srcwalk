@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 const SearchParams = Type.Object({
-  query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol callers/callees/references." }),
+  query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'. Not glob, symbol, path:line, absolute path, or multi-scope." })),
 });
 
@@ -25,9 +25,7 @@ const ShowParams = Type.Object({
   search_id: Type.Optional(Type.String({ description: "ID from semantic_search. Use with candidate_id." })),
   inspect_id: Type.Optional(Type.String({ description: "ID from semantic_inspect. Use with candidate_id." })),
   candidate_id: Type.Optional(Type.Number({ description: "1-based candidate number from semantic_search or semantic_inspect." })),
-  target: Type.Optional(Type.String({ description: "Direct path:line target, e.g. 'src/index/cache.ts:154-259'. Stateless alternative to id+candidate_id." })),
-  mode: Type.Optional(Type.String({ description: "Output mode: 'context' (default, with flow map and call neighborhood) or 'show' (raw code with context lines)." })),
-  scope: Type.Optional(Type.String({ description: "Override scope for context mode. Defaults to the stored result scope, or '.' if using direct target." })),
+  target: Type.Optional(Type.String({ description: "Direct path:line target(s), e.g. 'src/index/cache.ts:154-259' or 'a.ts:10,b.ts:20-30'. Stateless alternative to id+candidate_id." })),
 });
 
 // === before_agent_start sentinels ===
@@ -35,8 +33,8 @@ const SENTINEL_START = "<!-- pi-srcwalk:tools-rules:start -->";
 const SENTINEL_END   = "<!-- pi-srcwalk:tools-rules:end -->";
 
 const InspectParams = Type.Object({
-  symbol: Type.String({ description: "Exact symbol name, not natural language (e.g. 'buildOrLoadIndex')." }),
-  relation: Type.Optional(Type.String({ description: "What to show: 'all' (default), 'callers', 'callees', or 'references'." })),
+  symbol: Type.String({ description: "Exact symbol name(s), comma-separated for up to 3 (e.g. 'buildOrLoadIndex' or 'foo,bar,baz'). Not natural language." }),
+  relation: Type.Optional(Type.String({ description: "Relation section to include with context: 'all' (default), 'callers', 'callees', or 'references'." })),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. File scopes are widened to their parent directory for callers/callees trace commands." })),
   limit: Type.Optional(Type.Number({ description: "Max results per section (default: 20)." })),
 });
@@ -66,7 +64,8 @@ interface SemanticSearchDetails {
 
 interface SemanticInspectDetails {
   inspectId: string;
-  symbol: string;
+  symbol?: string;
+  symbols?: string[];
   relation: string;
   scope: string;
   candidates: Array<{ id?: number; target: string; symbol?: string }>;
@@ -184,16 +183,59 @@ function traceScopeForInspect(repo: string, scope: string, relation: string): st
 
 function inspectCommands(symbol: string, relation: string, scope: string, traceScope: string, limit: number): SrcwalkCommand[] {
   const cmds: SrcwalkCommand[] = [];
+  // Always run discover first — used for target resolution + references
+  cmds.push({ label: `discover:${symbol}`, args: ["srcwalk", "discover", symbol, "--as", "symbol", "--scope", scope, "--limit", String(limit), "--budget", "5000"], purpose: "discover references", parseAs: "discover" });
+  // Context is added separately after discover resolves the target
   if (relation === "all" || relation === "callers") {
     cmds.push({ label: `trace-callers:${symbol}`, args: ["srcwalk", "trace", "callers", symbol, "--scope", traceScope, "--limit", String(limit), "--budget", "5000"], purpose: "trace callers", parseAs: "trace" });
   }
   if (relation === "all" || relation === "callees") {
     cmds.push({ label: `trace-callees:${symbol}`, args: ["srcwalk", "trace", "callees", symbol, "--scope", traceScope, "--detailed", "--budget", "5000"], purpose: "trace callees", parseAs: "trace" });
   }
-  if (relation === "all" || relation === "references") {
-    cmds.push({ label: `discover:${symbol}`, args: ["srcwalk", "discover", symbol, "--as", "symbol", "--scope", scope, "--limit", String(limit), "--budget", "5000"], purpose: "discover references", parseAs: "discover" });
-  }
   return cmds;
+}
+
+async function inspectOneSymbol(
+  symbol: string,
+  relation: string,
+  scope: string,
+  traceScope: string,
+  repo: string,
+  signal: AbortSignal | undefined,
+  limit: number,
+): Promise<{ results: Array<{ code: number; output: string; command: SrcwalkCommand }>; targets: string[] }> {
+  const commands = inspectCommands(symbol, relation, scope, traceScope, limit);
+  const results: Array<{ code: number; output: string; command: SrcwalkCommand }> = [];
+
+  const discoverCmd = commands.shift()!;
+  const discoverResult = await runCommand(repo, discoverCmd, signal);
+
+  const discoverTargets = parseInspectTargets(discoverResult.output);
+  const resolvedTarget = discoverTargets.length > 0 ? discoverTargets[0]! : symbol;
+
+  const contextCmd: SrcwalkCommand = {
+    label: `context:${symbol}`,
+    args: ["srcwalk", "context", resolvedTarget, "--scope", scope, "--budget", "5000"],
+    purpose: "inspect symbol context",
+    parseAs: "context",
+  };
+  const contextResult = await runCommand(repo, contextCmd, signal);
+  results.push(contextResult);
+
+  for (const cmd of commands) {
+    const result = await runCommand(repo, cmd, signal);
+    results.push(result);
+  }
+
+  if (relation === "all" || relation === "references") results.push(discoverResult);
+
+  const targets = new Set<string>();
+  for (const r of results) {
+    for (const t of parseInspectTargets(r.output)) {
+      targets.add(t);
+    }
+  }
+  return { results, targets: Array.from(targets) };
 }
 
 function formatInspectPacket(repo: string, symbol: string, relation: string, scope: string, traceScope: string, results: Array<{ code: number; output: string; command: SrcwalkCommand }>): string {
@@ -202,9 +244,10 @@ function formatInspectPacket(repo: string, symbol: string, relation: string, sco
   sections.push("");
   for (const r of results) {
     const label = r.command.label;
+    const isContext = label.startsWith("context:");
     const isCallers = label.startsWith("trace-callers");
     const isCallees = label.startsWith("trace-callees");
-    const section = isCallers ? "Callers" : isCallees ? "Callees" : "References";
+    const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
     sections.push(`## ${section}`);
     const out = r.output.trim();
     if (r.code !== 0) {
@@ -363,12 +406,14 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_inspect",
     label: "Semantic Inspect",
-    description: "Show callers, detailed callees, and references for a known symbol.",
-    promptSnippet: "Show callers/callees/references for a known symbol",
+    description: "Inspect known symbol(s) deeply: context + callers + callees + references in one shot. Accepts one symbol or up to 3 symbols.",
+    promptSnippet: "Inspect known symbol(s): context + callers + callees + references",
     promptGuidelines: [
-      "Use semantic_inspect only when the symbol name is known.",
-      "Default relation='all' shows callers, detailed callees, and references.",
-      "Use relation='callers', 'callees', or 'references' to narrow output.",
+      "Use semantic_inspect only when symbol name(s) are known exactly.",
+      "Accepts one symbol, or comma-separated symbols (max 3).",
+      "Example: 'buildOrLoadIndex' or 'foo, bar, baz'.",
+      "Default relation='all' shows context, callers, detailed callees, and references.",
+      "Context is always shown; use relation='callers', 'callees', or 'references' to narrow relation sections.",
       "Use semantic_search first for ambiguous names or natural-language discovery.",
       "Open returned targets with semantic_show using inspect_id + candidate_id.",
     ],
@@ -376,43 +421,50 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     prepareArguments(args: unknown) {
       if (!args || typeof args !== "object") return args;
       const input = args as Record<string, unknown>;
+      const raw = typeof input.symbol === "string" ? input.symbol : "";
+      const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
       return {
-        symbol: input.symbol,
+        symbol: parts.length === 1 ? parts[0] : undefined,
+        symbols: parts.length > 1 ? parts : undefined,
         relation: input.relation,
         scope: input.scope,
         limit: input.limit,
       };
     },
-    async execute(_toolCallId: string, params: { symbol: string; relation?: string; scope?: string; limit?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      const symbol = params.symbol;
+    async execute(_toolCallId: string, params: { symbol?: string; symbols?: string[]; relation?: string; scope?: string; limit?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const rawSymbols = params.symbols ?? (params.symbol ? [params.symbol] : []);
       const relation = params.relation ?? "all";
       const scope = params.scope?.trim() || ".";
       const limit = Math.max(1, Math.min(params.limit ?? 20, 50));
-      onUpdate?.({ content: [{ type: "text", text: `Running semantic_inspect for ${symbol} (${relation})...` }] });
 
+      if (rawSymbols.length === 0) {
+        return { content: [{ type: "text", text: "semantic_inspect: provide either symbol or symbols." }] };
+      }
+      if (rawSymbols.length > 3) {
+        return { content: [{ type: "text", text: `semantic_inspect: max 3 symbols, got ${rawSymbols.length}.` }] };
+      }
       if (!["all", "callers", "callees", "references"].includes(relation)) {
         return { content: [{ type: "text", text: `semantic_inspect: relation must be 'all', 'callers', 'callees', or 'references', got '${relation}'.` }] };
       }
 
       const traceScope = traceScopeForInspect(ctx.cwd, scope, relation);
-      const commands = inspectCommands(symbol, relation, scope, traceScope, limit);
-      const results: Array<{ code: number; output: string; command: SrcwalkCommand }> = [];
-      for (const cmd of commands) {
-        const result = await runCommand(ctx.cwd, cmd, signal);
-        results.push(result);
+      const isMulti = rawSymbols.length > 1;
+      onUpdate?.({ content: [{ type: "text", text: `Running semantic_inspect for ${rawSymbols.join(", ")} (${relation})...` }] });
+
+      const symbolResults: Array<{ symbol: string; results: Array<{ code: number; output: string; command: SrcwalkCommand }>; targets: string[] }> = [];
+      for (const symbol of rawSymbols) {
+        const { results, targets } = await inspectOneSymbol(symbol, relation, scope, traceScope, ctx.cwd, signal, limit);
+        symbolResults.push({ symbol, results, targets });
       }
 
       // Build registry entry for semantic_show
       cleanupSearches();
       const inspectId = nextInspectId(ctx.cwd);
-      const allTargets = new Set<string>();
+      let idCounter = 1;
       const allCandidates: Array<{ id: number; target: string; symbol?: string }> = [];
-      for (const r of results) {
-        for (const t of parseInspectTargets(r.output)) {
-          if (!allTargets.has(t)) {
-            allTargets.add(t);
-            allCandidates.push({ id: allCandidates.length + 1, target: t, symbol });
-          }
+      for (const sr of symbolResults) {
+        for (const t of sr.targets) {
+          allCandidates.push({ id: idCounter++, target: t, symbol: sr.symbol });
         }
       }
       recentSearches.set(inspectId, {
@@ -423,11 +475,42 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         lastAccess: Date.now(),
       });
 
-      const packet = `inspect_id: ${inspectId}\n\n${formatInspectPacket(ctx.cwd, symbol, relation, scope, traceScope, results)}`;
+      // Build packet
+      let packet: string;
+      if (isMulti) {
+        const sections = [`# semantic-inspect: ${rawSymbols.length} symbols`, `repo: ${ctx.cwd}`, `relation: ${relation}`, `scope: ${scope}`];
+        if (traceScope !== scope) sections.push(`trace_scope: ${traceScope} (file scope adjusted for callers/callees)`);
+        sections.push("");
+        for (const sr of symbolResults) {
+          sections.push(`# Symbol: ${sr.symbol}`);
+          for (const r of sr.results) {
+            const label = r.command.label;
+            const isContext = label.startsWith("context:");
+            const isCallers = label.startsWith("trace-callers");
+            const isCallees = label.startsWith("trace-callees");
+            const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
+            sections.push(`## ${section}`);
+            const out = r.output.trim();
+            if (r.code !== 0) {
+              sections.push(`(command failed code=${r.code})`);
+            } else if (out) {
+              sections.push(out);
+            } else {
+              sections.push("(none)");
+            }
+            sections.push("");
+          }
+        }
+        packet = `inspect_id: ${inspectId}\n\n${sections.join("\n")}`;
+      } else {
+        packet = `inspect_id: ${inspectId}\n\n${formatInspectPacket(ctx.cwd, rawSymbols[0]!, relation, scope, traceScope, symbolResults[0]!.results)}`;
+      }
+
       const truncated = await truncateForTool(packet);
       const details: SemanticInspectDetails = {
         inspectId,
-        symbol,
+        symbol: isMulti ? undefined : rawSymbols[0],
+        symbols: isMulti ? rawSymbols : undefined,
         relation,
         scope,
         candidates: allCandidates,
@@ -436,8 +519,9 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
       return { content: [{ type: "text", text: truncated.text }], details };
     },
-    renderCall(args: { symbol?: string; relation?: string; scope?: string }, theme: ThemeLike) {
-      let text = theme.fg("toolTitle", theme.bold("semantic_inspect ")) + theme.fg("accent", args.symbol ?? "");
+    renderCall(args: { symbol?: string; symbols?: string[]; relation?: string; scope?: string }, theme: ThemeLike) {
+      const label = args.symbols ? `${args.symbols.length} symbols` : (args.symbol ?? "");
+      let text = theme.fg("toolTitle", theme.bold("semantic_inspect ")) + theme.fg("accent", label);
       if (args.relation && args.relation !== "all") text += theme.fg("muted", ` (${args.relation})`);
       if (args.scope) text += theme.fg("muted", ` in ${args.scope}`);
       return new Text(text, 0, 0);
@@ -446,7 +530,8 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (isPartial) return new Text(theme.fg("warning", "Inspecting symbol..."), 0, 0);
       const details = result.details as SemanticInspectDetails | undefined;
       if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
-      let text = theme.fg("dim", `${details.inspectId} `) + theme.fg("accent", details.symbol) + theme.fg("dim", ` · ${details.relation}`);
+      const label = details.symbols ? `${details.symbols.length} symbols` : (details.symbol ?? "");
+      let text = theme.fg("dim", `${details.inspectId} `) + theme.fg("accent", label) + theme.fg("dim", ` · ${details.relation}`);
       if (details.candidates.length) text += theme.fg("dim", ` · ${details.candidates.length} targets`);
       if (details.truncated) text += theme.fg("warning", " · truncated");
       if (expanded && details.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
@@ -513,12 +598,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_show",
     label: "Semantic Show",
-    description: "Open a candidate from semantic_search/semantic_inspect, or a direct path:line target. Default context mode shows flow/call context; show mode shows raw code.",
-    promptSnippet: "Open code context with semantic_show",
+    description: "Open a target to read exact source code via srcwalk show. Pass search_id/inspect_id + candidate_id, or a direct path:line target. Supports multi-target like 'a.ts:10,b.ts:20-30'.",
+    promptSnippet: "Open exact source code with semantic_show",
     promptGuidelines: [
-      "Use semantic_show after semantic_search or semantic_inspect to inspect one candidate.",
+      "Use semantic_show after semantic_search or semantic_inspect to read one exact source candidate.",
       "Pass search_id/inspect_id + candidate_id, or pass target directly for stateless use.",
-      "Default mode='context' gives flow/call context; use mode='show' for raw code.",
     ],
     parameters: ShowParams,
     prepareArguments(args: unknown) {
@@ -529,14 +613,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         inspect_id: input.inspect_id,
         candidate_id: input.candidate_id,
         target: input.target,
-        mode: input.mode,
-        scope: input.scope,
       };
     },
-    async execute(_toolCallId: string, params: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string; mode?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+    async execute(_toolCallId: string, params: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       // Resolve target from params
       let target: string;
-      let scope: string;
       let candidateInfo: string;
       let repo = ctx.cwd;
       const registryId = params.search_id ?? params.inspect_id;
@@ -544,7 +625,6 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (params.target) {
         // Stateless: target provided directly
         target = params.target;
-        scope = params.scope?.trim() || ".";
         candidateInfo = target;
       } else if (registryId && params.candidate_id != null) {
         // Stateful: lookup from registry
@@ -565,25 +645,25 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: `semantic_show: candidate_id ${params.candidate_id} out of range (1-${record.candidates.length}).` }] };
         }
         target = candidate.target;
-        scope = params.scope?.trim() || record.scope;
         candidateInfo = `${candidate.target}${candidate.symbol ? ` ${candidate.symbol}` : ""}`;
       } else {
         return { content: [{ type: "text", text: "semantic_show: provide either (search_id/inspect_id + candidate_id) or target directly." }] };
       }
 
-      const mode = params.mode === "show" ? "show" : "context";
-      onUpdate?.({ content: [{ type: "text", text: `Running semantic_show ${mode} for ${target}...` }] });
+      onUpdate?.({ content: [{ type: "text", text: `Running srcwalk show for ${target}...` }] });
 
-      const command: SrcwalkCommand = mode === "show"
-        ? { label: `show:${target}`, args: ["srcwalk", "show", target, "-C", "12", "--budget", "5000"], purpose: "show candidate code", parseAs: "show" }
-        : { label: `context:${target}`, args: ["srcwalk", "context", target, "--scope", scope, "--budget", "5000"], purpose: "show candidate context", parseAs: "context" };
+      const command: SrcwalkCommand = {
+        label: `show:${target}`,
+        args: ["srcwalk", "show", target, "-C", "12", "--budget", "5000"],
+        purpose: "show source code",
+        parseAs: "show",
+      };
 
       const result = await runCommand(repo, command, signal);
 
       const header = [
         `# semantic-show: ${candidateInfo}`,
-        `search_id: ${params.search_id ?? "-"} | inspect_id: ${params.inspect_id ?? "-"} | candidate_id: ${params.candidate_id ?? "-"} | mode: ${mode}`,
-        `scope: ${scope}`,
+        `search_id: ${params.search_id ?? "-"} | inspect_id: ${params.inspect_id ?? "-"} | candidate_id: ${params.candidate_id ?? "-"}`,
         "",
       ].join("\n");
 
@@ -595,11 +675,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
       return { content: [{ type: "text", text: truncated.text }] };
     },
-    renderCall(args: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string; mode?: string }, theme: ThemeLike) {
+    renderCall(args: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string }, theme: ThemeLike) {
       const registryId = args.search_id ?? args.inspect_id;
       const label = args.target ?? (registryId ? `id:${registryId} candidate:${args.candidate_id}` : "");
       let text = theme.fg("toolTitle", theme.bold("semantic_show ")) + theme.fg("accent", label);
-      if (args.mode) text += theme.fg("muted", ` (${args.mode})`);
       return new Text(text, 0, 0);
     },
     renderResult(result: ToolResultLike, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: ThemeLike) {
@@ -626,14 +705,16 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "### Contract",
       "",
       "1. **semantic_search** — discovery + NL routing:",
-      "   NL query → auto-detect intent (overview, deps, callers,",
-      "   callees, tests, symbol lookup). Use when target is unclear.",
-      "2. **semantic_inspect** — known symbol, all-in-one trace:",
-      "   callers + callees + references in one shot. Not a search.",
-      "   Use when symbol name is known exactly.",
-      "3. **semantic_show** — open a target to read code:",
-      "   path:line or id + candidate. context (structure) | show (raw).",
-      "   Read only, no trace.",
+      "   NL query → auto-detect intent (overview, deps, tests,",
+      "   fuzzy symbol lookup). Use when target is unclear.",
+      "   For exact known symbols, use semantic_inspect.",
+      "2. **semantic_inspect** — known symbol(s) deep inspect:",
+      "   context + callers + callees + references in one shot.",
+      "   Accepts one symbol or up to 3 symbols. Runs srcwalk context,",
+      "   relation traces, and refs.",
+      "3. **semantic_show** — exact source read via srcwalk show:",
+      "   path:line or id + candidate. Fixed -C 12 surrounding source lines.",
+      "   For structural context of a known symbol, use semantic_inspect.",
       "4. **semantic_review** — verify changes. staged | working-tree.",
       "5. Respect confidence: `abstained: true` → no strong match.",
       "6. Follow search/inspect IDs. Don't retype paths.",
