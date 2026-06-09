@@ -7,7 +7,7 @@ All notable changes to this project are documented here.
 ### Added
 - Added `semantic_query` as the code-structure discovery tool, replacing `semantic_search`.
 - Added `semantic_grep` for deterministic literal and regex search with trigram-index candidate pruning and full-scan fallback.
-- Added grouped-by-file output for `semantic_query` candidates and `semantic_grep` matches.
+- Added grouped output for `semantic_query` candidates and evidence expansions, plus `semantic_grep` matches.
 
 ### Changed
 - The Pi prompt contract now routes raw text and regex search to `semantic_grep` and code-intent discovery to `semantic_query`.

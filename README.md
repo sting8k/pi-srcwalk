@@ -81,9 +81,7 @@ changed code
 
 ### `semantic_query`
 
-```ts
-semantic_query({ query: string, scope?: string })
-```
+Use this for broad code discovery: questions, fuzzy symbols, file targets, overviews, deps, and tests.
 
 What it does:
 
@@ -106,28 +104,13 @@ What it does:
 Every result includes:
 
 - **Retrieval confidence** — `high` when candidates cluster tightly; `medium` when results spread across modules or query is broad.
-- **Bounded evidence** — raw `srcwalk` output, not an LLM summary. Open returned candidates with `semantic_show`, or inspect exact known symbols with `semantic_inspect`.
+- **Bounded evidence** — compact `srcwalk` evidence by default, with full blocks available in deep detail. Open returned candidates with `semantic_show`, or inspect exact known symbols with `semantic_inspect`.
 
 When `semantic_query` abstains (`abstained: true`), it means no strong match was found — do not fabricate evidence from thin air.
 
 ### `semantic_grep`
 
-```ts
-semantic_grep({
-  pattern?: string,
-  query?: string,
-  scope?: string,
-  path?: string,
-  glob?: string,
-  literal?: boolean,
-  regex?: boolean,
-  ignoreCase?: boolean,
-  ignore_case?: boolean,
-  context?: number,
-  limit?: number,
-  max_results?: number,
-})
-```
+Use this for exact text or regex matches. Add `scope`, `glob`, `literal`, `regex`, `ignoreCase`, or `context` only when needed.
 
 What it does:
 
@@ -146,14 +129,7 @@ What it does:
 
 ### `semantic_inspect`
 
-```ts
-semantic_inspect({
-  symbol: string, // exact symbol name, or comma-separated names; max 3
-  relation?: "all" | "callers" | "callees" | "references",
-  scope?: string,
-  limit?: number,
-})
-```
+Use this when you already know the exact symbol name. Pass up to three symbols with commas when needed.
 
 What it does:
 
@@ -182,14 +158,7 @@ semantic_inspect({ symbol: "executeSearch,readArg,formatInspectPacket" })
 
 ### `semantic_show`
 
-```ts
-semantic_show({
-  search_id?: string,  // from semantic_query
-  inspect_id?: string, // from semantic_inspect
-  candidate_id?: number,
-  target?: string,     // direct path:line target(s)
-})
-```
+Use this to open exact source from a previous `search_id` / `inspect_id`, or from a direct `path:line` target.
 
 What it does:
 
@@ -219,9 +188,7 @@ semantic_show({ target: "src/engine.ts:45-55,src/router/intent.ts:1-5" })
 
 ### `semantic_review`
 
-```ts
-semantic_review({ target?: "staged" | "working-tree", scope?: string })
-```
+Use this to review staged or working-tree changes, optionally narrowed to one scope.
 
 What it does:
 

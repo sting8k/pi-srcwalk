@@ -7,6 +7,37 @@ function commandLine(result: CommandResult): string {
   return `- [${status}, ${result.elapsedMs}ms${matches}] ${result.command.label}: ${commandDisplay(result.command)}`;
 }
 
+function expansionTarget(label: string): string {
+  const idx = label.indexOf(":");
+  return idx >= 0 ? label.slice(idx + 1) : label;
+}
+
+function expansionGroupKey(result: CommandResult): string {
+  if (result.command.parseAs === "trace") return result.command.label.split(":")[0] ?? result.command.label;
+  return candidateFile(expansionTarget(result.command.label));
+}
+
+function expansionTitle(result: CommandResult): string {
+  const label = result.command.label;
+  const target = expansionTarget(label);
+  switch (result.command.parseAs) {
+    case "show": {
+      const span = candidateSpan(target);
+      return span !== target ? `show ${span}` : "show";
+    }
+    case "context": {
+      const span = candidateSpan(target);
+      return span !== target ? `context ${span}` : "context";
+    }
+    case "deps":
+      return "deps";
+    case "trace":
+      return label.split(":")[0] ?? "trace";
+    default:
+      return label;
+  }
+}
+
 function expansionSummary(result: CommandResult): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
   const preview = result.output
@@ -16,7 +47,7 @@ function expansionSummary(result: CommandResult): string {
     .slice(0, 2)
     .join(" | ");
   const trimmed = preview.length > 140 ? `${preview.slice(0, 137)}...` : preview;
-  return `- [${status}, ${result.elapsedMs}ms] ${result.command.label}${trimmed ? ` — ${trimmed}` : ""}`;
+  return `- [${status}, ${result.elapsedMs}ms] ${expansionTitle(result)}${trimmed ? ` — ${trimmed}` : ""}`;
 }
 
 function candidateFile(target: string): string {
@@ -47,6 +78,22 @@ function groupCandidates(candidates: Candidate[]): Array<{ file: string; candida
     order.push(file);
   }
   return order.map((file) => ({ file, candidates: groups.get(file) ?? [] }));
+}
+
+function groupExpansions(expansions: CommandResult[]): Array<{ group: string; expansions: CommandResult[] }> {
+  const groups = new Map<string, CommandResult[]>();
+  const order: string[] = [];
+  for (const expansion of expansions) {
+    const group = expansionGroupKey(expansion);
+    const existing = groups.get(group);
+    if (existing) {
+      existing.push(expansion);
+      continue;
+    }
+    groups.set(group, [expansion]);
+    order.push(group);
+  }
+  return order.map((group) => ({ group, expansions: groups.get(group) ?? [] }));
 }
 
 function candidateLine(candidate: Candidate): string {
@@ -96,13 +143,21 @@ export function formatResult(result: SearchResult, verbose = false): string {
   if (!result.expansions.length) {
     lines.push("- none");
   } else if (plan.detail === "brief") {
-    lines.push(`- ${result.expansions.length} expansion(s) available`);
-  } else if (plan.detail === "normal") {
-    lines.push(...result.expansions.map(expansionSummary));
+    const groups = groupExpansions(result.expansions);
+    lines.push(`- ${result.expansions.length} expansion(s) across ${groups.length} group(s)`);
   } else {
-    result.expansions.forEach((exp, idx) => {
-      lines.push(`### Expansion ${idx + 1}: ${exp.command.label} (${exp.code === 0 ? "ok" : `code=${exp.code}`}, ${exp.elapsedMs}ms)`, "```text", exp.output.trim(), "```", "");
-    });
+    for (const group of groupExpansions(result.expansions)) {
+      lines.push(`### ${group.group} — ${group.expansions.length} expansion${group.expansions.length === 1 ? "" : "s"}`);
+      if (plan.detail === "normal") {
+        lines.push(...group.expansions.map(expansionSummary));
+      } else {
+        for (const expansion of group.expansions) {
+          lines.push(`- [${expansion.code === 0 ? "ok" : `code=${expansion.code}`}, ${expansion.elapsedMs}ms] ${expansionTitle(expansion)}`);
+          lines.push("```text", expansion.output.trim(), "```", "");
+        }
+      }
+      lines.push("");
+    }
   }
   return lines.join("\n");
 }
