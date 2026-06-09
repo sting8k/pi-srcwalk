@@ -1,13 +1,14 @@
 # pi-srcwalk
 
-A Pi extension wrapper around [`srcwalk`](https://github.com/sting8k/srcwalk) — makes structural code-intelligence easy for AI coding agents. `srcwalk` is a CLI for symbol search, callers/callees, deps, and overviews; this package wraps it into four agent-safe semantic tools with bounded output, error handling, and registry-based candidate handoff.
+A Pi extension wrapper around [`srcwalk`](https://github.com/sting8k/srcwalk) — makes structural code-intelligence easy for AI coding agents. `srcwalk` is a CLI for symbol search, callers/callees, deps, and overviews; this package wraps it into five agent-safe semantic tools with bounded output, error handling, and registry-based candidate handoff.
 
-Four agent-facing tools:
+Five agent-facing tools:
 
-- **`semantic_search`** — discover ranked code evidence from natural-language questions, symbols, files, overviews, deps, and tests.
+- **`semantic_query`** — discover ranked code evidence from natural-language questions, symbols, files, overviews, deps, and tests.
 - **`semantic_inspect`** — deep-inspect known symbol(s): context, callers, callees, and references in one shot.
 - **`semantic_show`** — read exact source target(s) via `srcwalk show` with a fixed `-C 12` surrounding-line window.
 - **`semantic_review`** — review staged or working-tree changes with diff evidence and risk hints.
+- **`semantic_grep`** — search raw text or regex with trigram-indexed candidate pruning and full-scan fallback.
 
 No Python runtime. Pure TypeScript. Ships as a [Pi](https://github.com/earendil-works/pi) extension package.
 
@@ -43,7 +44,7 @@ pi install npm:@sting8k/pi-srcwalk
 pi -e ./extensions/pi-srcwalk/index.ts
 ```
 
-After `/reload` in Pi, all four tools become available.
+After `/reload` in Pi, all five tools become available.
 
 ---
 
@@ -51,10 +52,13 @@ After `/reload` in Pi, all four tools become available.
 
 ```text
 unknown target / broad question
-  -> semantic_search
+  -> semantic_query
 
 known exact symbol
   -> semantic_inspect
+
+raw text / regex
+  -> semantic_grep
 
 exact path:line or candidate id
   -> semantic_show
@@ -65,8 +69,9 @@ changed code
 
 | Need | Use |
 |---|---|
-| Find likely files, symbols, deps, tests, or overview | `semantic_search` |
+| Find likely files, symbols, deps, tests, or overview | `semantic_query` |
 | Understand one known symbol deeply | `semantic_inspect` |
+| Search raw text or regex | `semantic_grep` |
 | Read exact source from a candidate or `path:line` | `semantic_show` |
 | Review current diff | `semantic_review` |
 
@@ -74,11 +79,9 @@ changed code
 
 ## Tools
 
-### `semantic_search`
+### `semantic_query`
 
-```ts
-semantic_search({ query: string, scope?: string })
-```
+Use this for broad code discovery: questions, fuzzy symbols, file targets, overviews, deps, and tests.
 
 What it does:
 
@@ -101,20 +104,32 @@ What it does:
 Every result includes:
 
 - **Retrieval confidence** — `high` when candidates cluster tightly; `medium` when results spread across modules or query is broad.
-- **Bounded evidence** — raw `srcwalk` output, not an LLM summary. Open returned candidates with `semantic_show`, or inspect exact known symbols with `semantic_inspect`.
+- **Bounded evidence** — compact `srcwalk` evidence by default, with full blocks available in deep detail. Open returned candidates with `semantic_show`, or inspect exact known symbols with `semantic_inspect`.
 
-When `semantic_search` abstains (`abstained: true`), it means no strong match was found — do not fabricate evidence from thin air.
+When `semantic_query` abstains (`abstained: true`), it means no strong match was found — do not fabricate evidence from thin air.
+
+### `semantic_grep`
+
+Use this for regex search by default. Set `literal: true` for exact strings, and add `scope`, `glob`, `ignoreCase`, or `context` only when needed.
+
+What it does:
+
+- Searches regex patterns by default and exact strings when `literal: true` is set.
+- Uses a trigram-indexed pipeline: literal anchor extraction, candidate pruning, then exact line verification.
+- Falls back to full scanning when regex anchors are too weak or too complex.
+- Returns raw file:line matches with optional context lines.
+- Replaces built-in `grep` in the pi-srcwalk injected tool contract.
+
+| You ask | It returns |
+|---|---|
+| `execute.*Search` | regex matches with pruned candidates |
+| `literal: true, "foo.bar"` | exact literal file:line matches |
+| `--glob "**/*.ts"` | same search, but limited to matching files |
+| `-i` / `ignoreCase: true` | case-insensitive matches |
 
 ### `semantic_inspect`
 
-```ts
-semantic_inspect({
-  symbol: string, // exact symbol name, or comma-separated names; max 3
-  relation?: "all" | "callers" | "callees" | "references",
-  scope?: string,
-  limit?: number,
-})
-```
+Use this when you already know the exact symbol name. Pass up to three symbols with commas when needed.
 
 What it does:
 
@@ -143,26 +158,19 @@ semantic_inspect({ symbol: "executeSearch,readArg,formatInspectPacket" })
 
 ### `semantic_show`
 
-```ts
-semantic_show({
-  search_id?: string,  // from semantic_search
-  inspect_id?: string, // from semantic_inspect
-  candidate_id?: number,
-  target?: string,     // direct path:line target(s)
-})
-```
+Use this to open exact source from a previous `search_id` / `inspect_id`, or from a direct `path:line` target.
 
 What it does:
 
 - Reads exact source code via `srcwalk show <target> -C 12 --budget 5000`.
-- Opens a candidate from `semantic_search` using `search_id + candidate_id`.
+- Opens a candidate from `semantic_query` using `search_id + candidate_id`.
 - Opens a candidate from `semantic_inspect` using `inspect_id + candidate_id`.
 - Also accepts direct targets, including multi-target strings like `a.ts:10,b.ts:20-30`.
 - Does not run `srcwalk context` or relation traces. For structural context around a known symbol, use `semantic_inspect`.
 
 ```ts
 // Open candidate #1 from a previous search
-semantic_search({ query: "buildOrLoadIndex" })
+semantic_query({ query: "buildOrLoadIndex" })
 // -> returns search_id: "r595b4-s1", candidates: [...]
 semantic_show({ search_id: "r595b4-s1", candidate_id: 1 })
 
@@ -180,9 +188,7 @@ semantic_show({ target: "src/engine.ts:45-55,src/router/intent.ts:1-5" })
 
 ### `semantic_review`
 
-```ts
-semantic_review({ target?: "staged" | "working-tree", scope?: string })
-```
+Use this to review staged or working-tree changes, optionally narrowed to one scope.
 
 What it does:
 
@@ -200,7 +206,7 @@ Use `semantic_review` when the user asks to review, check, summarize, or assess 
 ### Understand and edit existing code
 
 ```text
-semantic_search({ query: "where is cache eviction handled?" })
+semantic_query({ query: "where is cache eviction handled?" })
   -> semantic_inspect({ symbol: "evictOldest" })
   -> semantic_show({ inspect_id, candidate_id: 1 })
   -> edit
@@ -220,10 +226,15 @@ semantic_review({ target: "working-tree" })
 
 ```text
 Agent (Pi)
-  ├─ semantic_search(query, scope?)
+  ├─ semantic_query(query, scope?)
   │    discovery / NL routing
   │    -> BM25/PRF + srcwalk evidence
   │    -> ranked candidates + confidence
+  │
+  ├─ semantic_grep({ pattern, scope?, glob?, literal?, regex? })
+  │    deterministic text/regex search
+  │    -> literal anchors / trigram prune
+  │    -> verify exact line matches
   │
   ├─ semantic_inspect({ symbol, relation?, scope?, limit? })
   │    known symbol(s), max 3
@@ -241,7 +252,7 @@ Agent (Pi)
        -> srcwalk review --staged | working-tree
 ```
 
-Each lane returns bounded `srcwalk` evidence and truncates tool output to 50KB. `semantic_search` is broad discovery, `semantic_inspect` is targeted symbol understanding, `semantic_show` is exact source reading, and `semantic_review` is changed-code review.
+Each lane returns bounded `srcwalk` evidence and truncates tool output to 50KB. `semantic_query` is broad discovery, `semantic_grep` is raw text/regex search, `semantic_inspect` is targeted symbol understanding, `semantic_show` is exact source reading, and `semantic_review` is changed-code review.
 
 ---
 
@@ -250,7 +261,7 @@ Each lane returns bounded `srcwalk` evidence and truncates tool output to 50KB. 
 Broad-query BM25/PRF uses a process-local compact memory cache:
 
 ```text
-semantic_search process
+semantic_query process
 └─ memory:<repo+scope+version hash>
    ├─ path table + chunk line ranges + short previews
    ├─ vocab table + token→termId map
@@ -280,9 +291,9 @@ The retained memory index avoids full chunk text and duplicated token strings; i
 ```text
 pi-srcwalk/
 ├── package.json                     # Pi package manifest
-├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (4 tools)
+├── extensions/pi-srcwalk/index.ts   # Pi extension entrypoint (5 tools)
 ├── src/                             # TS-native runtime engine
-│   ├── engine.ts                    # semantic_search orchestration
+│   ├── engine.ts                    # semantic_query orchestration
 │   ├── cli.ts                       # dev smoke-test CLI
 │   ├── index/                       # compact memory cache + BM25/PRF
 │   ├── router/                      # intent detection + command planning
