@@ -913,10 +913,14 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     },
   });
 
-  disableDefaultGrepIfSupported(pi);
+  // Cast: ExtensionAPI type lacks on() — provided at runtime by Pi.
+  // Action methods such as setActiveTools() must run after session initialization.
+  const piEvents = pi as unknown as { on(event: string, handler: (event: any, ctx?: unknown) => any): void };
 
-  // Cast: ExtensionAPI type lacks on() — provided at runtime by Pi
-  const piEvents = pi as unknown as { on(event: string, handler: (event: { systemPrompt: string }) => any): void };
+  piEvents.on("session_start", async () => {
+    disableDefaultGrepIfSupported(pi);
+  });
+
   // === before_agent_start: inject semantic_* contract into system prompt ===
   piEvents.on("before_agent_start", async (event) => {
     const block = [
