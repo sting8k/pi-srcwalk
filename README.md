@@ -188,6 +188,7 @@ What it does:
 
 - Runs `srcwalk review` on staged changes by default.
 - With `target: "working-tree"`, reviews unstaged diffs.
+- If `scope` points to a nested git repo, runs review inside that repo.
 - Returns changed files, affected symbols, and risk hints.
 
 Use `semantic_review` when the user asks to review, check, summarize, or assess current changes.
