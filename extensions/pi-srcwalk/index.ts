@@ -18,7 +18,7 @@ const SearchParams = Type.Object({
 
 const ReviewParams = Type.Object({
   target: Type.Optional(Type.String({ description: "Changes to review: 'staged' (default) or 'working-tree'." })),
-  scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit review evidence; omit or use '.' for whole diff. Examples: 'src', 'src/index/cache.ts'. Not glob, absolute path, or multi-scope." })),
+  scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit review evidence; omit or use '.' for whole diff. If scope points to a nested git repo, review runs inside that repo. Examples: 'src', 'nested-repo', 'src/index/cache.ts'. Not glob, absolute path, or multi-scope." })),
 });
 
 const ShowParams = Type.Object({
@@ -266,7 +266,9 @@ type ReviewTarget = "staged" | "working-tree";
 
 interface SemanticReviewDetails {
   target: ReviewTarget;
+  repo: string;
   scope: string;
+  effectiveScope: string;
   code: number;
   elapsedMs: number;
   changedFiles?: number;
@@ -280,6 +282,76 @@ interface SemanticReviewDetails {
 function normalizeReviewTarget(target?: string): ReviewTarget {
   const normalized = target?.trim().toLowerCase();
   return normalized === "working-tree" || normalized === "worktree" || normalized === "working" ? "working-tree" : "staged";
+}
+
+interface ReviewExecutionContext {
+  repo: string;
+  scope: string;
+  requestedScope: string;
+}
+
+function isInsideOrSame(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function tryStat(target: string): fs.Stats | undefined {
+  try {
+    return fs.statSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+function tryRealpath(target: string): string | undefined {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+function hasGitMetadata(dir: string): boolean {
+  return fs.existsSync(path.join(dir, ".git"));
+}
+
+function findNestedGitRoot(startDir: string, stopAt: string): string | undefined {
+  let current = path.resolve(startDir);
+  const stop = path.resolve(stopAt);
+
+  while (isInsideOrSame(stop, current)) {
+    if (current !== stop && hasGitMetadata(current)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  return undefined;
+}
+
+function resolveReviewContext(cwd: string, scope: string): ReviewExecutionContext {
+  const repo = path.resolve(cwd);
+  const repoRealpath = tryRealpath(repo) ?? repo;
+  const requestedScope = scope.trim() || ".";
+  const resolvedScope = path.resolve(repo, requestedScope);
+
+  if (isInsideOrSame(repo, resolvedScope)) {
+    const scopeStat = tryStat(resolvedScope);
+    const searchStart = scopeStat?.isDirectory() ? resolvedScope : path.dirname(resolvedScope);
+    const nestedRepo = findNestedGitRoot(searchStart, repo);
+    const nestedRealpath = nestedRepo ? tryRealpath(nestedRepo) : undefined;
+
+    if (nestedRepo && nestedRealpath && isInsideOrSame(repoRealpath, nestedRealpath)) {
+      const nestedScope = path.relative(nestedRepo, resolvedScope) || ".";
+      return {
+        repo: nestedRepo,
+        scope: nestedScope,
+        requestedScope,
+      };
+    }
+  }
+
+  return { repo, scope: requestedScope, requestedScope };
 }
 
 function reviewCommand(target: ReviewTarget, scope: string): SrcwalkCommand {
@@ -302,12 +374,14 @@ function parseReviewDetails(output: string): Pick<SemanticReviewDetails, "change
   };
 }
 
-function formatReviewPacket(repo: string, target: ReviewTarget, scope: string, result: { code: number; elapsedMs: number; output: string; command: SrcwalkCommand }): string {
+function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: ReviewExecutionContext, result: { code: number; elapsedMs: number; output: string; command: SrcwalkCommand }): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
+  const requestedScopeLine = reviewCtx.requestedScope !== reviewCtx.scope ? [`requested_scope: ${reviewCtx.requestedScope}`] : [];
   return [
     `# semantic-review: ${target}`,
     `repo: ${repo}`,
-    `scope: ${scope}`,
+    ...requestedScopeLine,
+    `scope: ${reviewCtx.scope}`,
     "",
     "## Command",
     `- [${status}, ${result.elapsedMs}ms] ${commandDisplay(result.command)}`,
@@ -548,6 +622,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "Use semantic_review for review, check, summarize, or assess current changes, diffs, patches, or risk.",
       "Default is staged changes; use target='working-tree' only for unstaged/current working-tree changes.",
       "Use semantic_search or semantic_inspect for existing-code discovery; use semantic_review for changed-code evidence.",
+      "If scope points to a nested git repo, semantic_review runs inside that repo.",
       "Treat output as bounded diff evidence; read exact ranges before detailed fix claims.",
     ],
     parameters: ReviewParams,
@@ -559,14 +634,19 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     async execute(_toolCallId: string, params: { target?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       const target = normalizeReviewTarget(params.target);
       const scope = params.scope?.trim() || ".";
-      onUpdate?.({ content: [{ type: "text", text: `Running semantic_review (${target})...` }] });
-      const command = reviewCommand(target, scope);
-      const result = await runCommand(ctx.cwd, command, signal);
-      const packet = formatReviewPacket(ctx.cwd, target, scope, result);
+      const reviewCtx = resolveReviewContext(ctx.cwd, scope);
+      const repoLabel = path.relative(path.resolve(ctx.cwd), reviewCtx.repo) || reviewCtx.repo;
+      const reviewLocation = reviewCtx.repo === path.resolve(ctx.cwd) ? scope : `${repoLabel}:${reviewCtx.scope}`;
+      onUpdate?.({ content: [{ type: "text", text: `Running semantic_review (${target}) in ${reviewLocation}...` }] });
+      const command = reviewCommand(target, reviewCtx.scope);
+      const result = await runCommand(reviewCtx.repo, command, signal);
+      const packet = formatReviewPacket(reviewCtx.repo, target, reviewCtx, result);
       const truncated = await truncateForTool(packet);
       const details: SemanticReviewDetails = {
         target,
-        scope,
+        repo: reviewCtx.repo,
+        scope: reviewCtx.requestedScope,
+        effectiveScope: reviewCtx.scope,
         code: result.code,
         elapsedMs: result.elapsedMs,
         ...parseReviewDetails(result.output),
