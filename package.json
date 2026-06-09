@@ -9,7 +9,8 @@
     "pi-extension",
     "srcwalk",
     "code-intelligence",
-    "semantic-search"
+    "semantic-query",
+    "semantic-grep"
   ],
   "repository": {
     "type": "git",

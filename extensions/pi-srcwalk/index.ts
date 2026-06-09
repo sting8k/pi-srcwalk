@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeSearch } from "../../src/engine.js";
+import { executeSemanticGrep, formatSemanticGrepResult } from "../../src/grep/semantic-grep.js";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
 import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
@@ -11,9 +12,24 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 
-const SearchParams = Type.Object({
+const QueryParams = Type.Object({
   query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
   scope: Type.Optional(Type.String({ description: "One repo-relative dir/file to limit search; omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'. Not glob, symbol, path:line, absolute path, or multi-scope." })),
+});
+
+const GrepParams = Type.Object({
+  pattern: Type.Optional(Type.String({ description: "Text or regex pattern to search. Use query as an alias if you prefer. Use semantic_query for code-intent discovery and semantic_grep for exact match search." })),
+  query: Type.Optional(Type.String({ description: "Alias of pattern." })),
+  scope: Type.Optional(Type.String({ description: "Repo-relative dir/file scope to search. Omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'." })),
+  path: Type.Optional(Type.String({ description: "Alias of scope." })),
+  glob: Type.Optional(Type.String({ description: "Optional simple glob to narrow files, e.g. '**/*.ts' or 'src/**/*.md'." })),
+  literal: Type.Optional(Type.Boolean({ description: "Treat the pattern as a literal string instead of regex." })),
+  regex: Type.Optional(Type.Boolean({ description: "Treat the pattern as regex; overrides literal when true." })),
+  ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search." })),
+  ignore_case: Type.Optional(Type.Boolean({ description: "Alias of ignoreCase." })),
+  context: Type.Optional(Type.Number({ description: "Number of surrounding lines to include around each match." })),
+  limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)." })),
+  max_results: Type.Optional(Type.Number({ description: "Alias of limit." })),
 });
 
 const ReviewParams = Type.Object({
@@ -22,9 +38,9 @@ const ReviewParams = Type.Object({
 });
 
 const ShowParams = Type.Object({
-  search_id: Type.Optional(Type.String({ description: "ID from semantic_search. Use with candidate_id." })),
+  search_id: Type.Optional(Type.String({ description: "ID from semantic_query. Use with candidate_id." })),
   inspect_id: Type.Optional(Type.String({ description: "ID from semantic_inspect. Use with candidate_id." })),
-  candidate_id: Type.Optional(Type.Number({ description: "1-based candidate number from semantic_search or semantic_inspect." })),
+  candidate_id: Type.Optional(Type.Number({ description: "1-based candidate number from semantic_query or semantic_inspect." })),
   target: Type.Optional(Type.String({ description: "Direct path:line target(s), e.g. 'src/index/cache.ts:154-259' or 'a.ts:10,b.ts:20-30'. Stateless alternative to id+candidate_id." })),
 });
 
@@ -50,13 +66,39 @@ interface ToolResultLike {
   details?: unknown;
 }
 
-interface SemanticSearchDetails {
+interface SemanticQueryDetails {
   searchId?: string;
   query: string;
   scope: string;
   confidence: { abstained: boolean; level: string; reason: string };
   candidates: Array<{ id?: number; target: string; symbol?: string; score: number; source: string; kind: string }>;
   cache?: { cacheKind: string; cacheHit: boolean; chunks: number; files: number; cacheLocation: string };
+  truncated?: boolean;
+  fullOutputPath?: string;
+}
+
+interface SemanticGrepDetails {
+  pattern: string;
+  scope: string;
+  glob?: string;
+  literal: boolean;
+  ignoreCase: boolean;
+  backend: string;
+  anchors: string[];
+  stats: {
+    cacheHit: boolean;
+    indexedFiles: number;
+    candidateFiles: number;
+    searchedFiles: number;
+    matchedFiles: number;
+    totalMatches: number;
+    truncated: boolean;
+    buildMs: number;
+    queryMs: number;
+    sizeBytes: number;
+    cacheLocation: string;
+  };
+  error?: string;
   truncated?: boolean;
   fullOutputPath?: string;
 }
@@ -394,26 +436,41 @@ function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: Revie
   ].join("\n");
 }
 
+function disableDefaultGrepIfSupported(pi: ExtensionAPI): void {
+  const controls = pi as unknown as Record<string, unknown>;
+  for (const method of ["disableDefaultTool", "disableTool", "unregisterTool"]) {
+    const fn = controls[method];
+    if (typeof fn !== "function") continue;
+    try {
+      (fn as (name: string) => void).call(controls, "grep");
+    } catch {
+      // Best-effort only: older Pi runtimes may not support disabling built-in tools.
+    }
+  }
+}
+
 export default function piSrcwalkExtension(pi: ExtensionAPI) {
+  disableDefaultGrepIfSupported(pi);
+
   pi.registerTool({
-    name: "semantic_search",
-    label: "Semantic Search",
+    name: "semantic_query",
+    label: "Semantic Query",
     description: "Discover ranked code evidence when the exact target is unknown: natural-language questions, files, symbols, overviews, deps, and tests.",
-    promptSnippet: "Discover ranked code evidence with semantic_search",
+    promptSnippet: "Discover ranked code evidence with semantic_query",
     promptGuidelines: [
-      "Use semantic_search for discovery when the target or symbol is unknown or ambiguous.",
+      "Use semantic_query for discovery when the target or symbol is unknown or ambiguous.",
       "Prefer semantic_inspect when the user names a concrete symbol and asks for callers, callees, or references.",
       "Set scope only to one repo-relative dir/file when known; put symbols and path:line targets in query.",
       "Treat confidence and returned targets as bounded evidence; verify exact ranges before detailed claims or edits.",
     ],
-    parameters: SearchParams,
+    parameters: QueryParams,
     prepareArguments(args: unknown) {
       if (!args || typeof args !== "object") return args;
       const input = args as Record<string, unknown>;
       return { query: input.query, scope: input.scope };
     },
     async execute(_toolCallId: string, params: { query: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      onUpdate?.({ content: [{ type: "text", text: "Running semantic_search..." }] });
+      onUpdate?.({ content: [{ type: "text", text: "Running semantic_query..." }] });
       const result = await executeSearch({
         query: params.query,
         repo: ctx.cwd,
@@ -444,7 +501,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
       const packet = `search_id: ${searchId}\n\n${formatResult(result, false)}`;
       const truncated = await truncateForTool(packet);
-      const details: SemanticSearchDetails = {
+      const details: SemanticQueryDetails = {
         searchId,
         query: result.plan.query,
         scope: result.plan.scope,
@@ -457,13 +514,13 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: truncated.text }], details };
     },
     renderCall(args: { query?: string; scope?: string }, theme: ThemeLike) {
-      let text = theme.fg("toolTitle", theme.bold("semantic_search ")) + theme.fg("accent", `"${args.query ?? ""}"`);
+      let text = theme.fg("toolTitle", theme.bold("semantic_query ")) + theme.fg("accent", `"${args.query ?? ""}"`);
       if (args.scope) text += theme.fg("muted", ` in ${args.scope}`);
       return new Text(text, 0, 0);
     },
     renderResult(result: ToolResultLike, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: ThemeLike) {
       if (isPartial) return new Text(theme.fg("warning", "Searching srcwalk evidence..."), 0, 0);
-      const details = result.details as SemanticSearchDetails | undefined;
+      const details = result.details as SemanticQueryDetails | undefined;
       if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
       let text = details.searchId ? theme.fg("dim", `${details.searchId} `) : "";
       text += details.confidence.abstained ? theme.fg("warning", `abstained: ${details.confidence.reason}`) : theme.fg("success", `${details.candidates.length} candidate(s), ${details.confidence.level} confidence`);
@@ -471,6 +528,93 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (details.truncated) text += theme.fg("warning", " · truncated");
       if (expanded) {
         for (const cand of details.candidates.slice(0, 5)) text += `\n${theme.fg("dim", `${cand.target} ${cand.symbol ?? ""} ${cand.score.toFixed(1)}`)}`;
+        if (details.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
+      }
+      return new Text(text, 0, 0);
+    },
+  });
+
+  pi.registerTool({
+    name: "semantic_grep",
+    label: "Semantic Grep",
+    description: "Search raw text or regex deterministically with Zoekt-lite trigram candidate pruning and full-scan fallback for weak regex patterns.",
+    promptSnippet: "Search exact text/regex with semantic_grep",
+    promptGuidelines: [
+      "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
+      "Prefer literal=true for exact strings and regex=true for regex patterns like 'foo.*bar'.",
+      "Set scope to one repo-relative dir/file and glob only when a file-pattern filter is useful.",
+      "Treat semantic_grep as the pi-srcwalk replacement for the default grep tool; avoid built-in grep unless semantic_grep lacks support and say why.",
+    ],
+    parameters: GrepParams,
+    prepareArguments(args: unknown) {
+      if (!args || typeof args !== "object") return args;
+      const input = args as Record<string, unknown>;
+      return {
+        pattern: input.pattern ?? input.query,
+        scope: input.scope ?? input.path,
+        glob: input.glob,
+        literal: input.literal,
+        regex: input.regex,
+        ignoreCase: input.ignoreCase ?? input.ignore_case,
+        context: input.context,
+        maxResults: input.max_results ?? input.limit,
+      };
+    },
+    async execute(_toolCallId: string, params: { pattern?: string; query?: string; scope?: string; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const pattern = params.pattern ?? params.query ?? "";
+      if (!pattern.trim()) {
+        return { content: [{ type: "text", text: "semantic_grep: provide pattern or query." }] };
+      }
+      const scope = params.scope?.trim() || ".";
+      const mode = params.regex ? "regex" : params.literal ? "literal" : "regex";
+      onUpdate?.({ content: [{ type: "text", text: `Running semantic_grep (${mode})...` }] });
+      const result = await executeSemanticGrep({
+        pattern,
+        repo: ctx.cwd,
+        scope,
+        glob: params.glob,
+        literal: params.literal,
+        regex: params.regex,
+        ignoreCase: params.ignoreCase,
+        context: params.context,
+        maxResults: params.maxResults,
+        signal,
+      });
+      const packet = formatSemanticGrepResult(result);
+      const truncated = await truncateForTool(packet);
+      const details: SemanticGrepDetails = {
+        pattern: result.pattern,
+        scope: result.scope,
+        glob: result.glob,
+        literal: result.literal,
+        ignoreCase: result.ignoreCase,
+        backend: result.backend,
+        anchors: result.anchors,
+        stats: result.stats,
+        error: result.error,
+        truncated: truncated.truncated,
+        fullOutputPath: truncated.fullOutputPath,
+      };
+      return { content: [{ type: "text", text: truncated.text }], details };
+    },
+    renderCall(args: { pattern?: string; query?: string; scope?: string; glob?: string; literal?: boolean; regex?: boolean }, theme: ThemeLike) {
+      const label = args.pattern ?? args.query ?? "";
+      const mode = args.regex ? "regex" : args.literal ? "literal" : "regex";
+      let text = theme.fg("toolTitle", theme.bold("semantic_grep ")) + theme.fg("accent", `/${label}/`) + theme.fg("dim", ` ${mode}`);
+      if (args.scope) text += theme.fg("muted", ` in ${args.scope}`);
+      if (args.glob) text += theme.fg("muted", ` glob ${args.glob}`);
+      return new Text(text, 0, 0);
+    },
+    renderResult(result: ToolResultLike, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: ThemeLike) {
+      if (isPartial) return new Text(theme.fg("warning", "Searching text/regex matches..."), 0, 0);
+      const details = result.details as SemanticGrepDetails | undefined;
+      if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
+      if (details.error) return new Text(theme.fg("warning", `semantic_grep error: ${details.error}`), 0, 0);
+      let text = theme.fg("success", `${details.stats.totalMatches} match(es)`) + theme.fg("dim", ` · ${details.backend} · ${details.stats.candidateFiles}/${details.stats.indexedFiles} files`);
+      if (details.stats.truncated) text += theme.fg("warning", " · match limit");
+      if (details.truncated) text += theme.fg("warning", " · output truncated");
+      if (expanded) {
+        text += `\n${theme.fg("dim", `anchors: ${details.anchors.length ? details.anchors.join(", ") : "none"}`)}`;
         if (details.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
       }
       return new Text(text, 0, 0);
@@ -488,7 +632,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "Example: 'buildOrLoadIndex' or 'foo, bar, baz'.",
       "Default relation='all' shows context, callers, detailed callees, and references.",
       "Context is always shown; use relation='callers', 'callees', or 'references' to narrow relation sections.",
-      "Use semantic_search first for ambiguous names or natural-language discovery.",
+      "Use semantic_query first for ambiguous names or natural-language discovery.",
       "Open returned targets with semantic_show using inspect_id + candidate_id.",
     ],
     parameters: InspectParams,
@@ -621,7 +765,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use semantic_review for review, check, summarize, or assess current changes, diffs, patches, or risk.",
       "Default is staged changes; use target='working-tree' only for unstaged/current working-tree changes.",
-      "Use semantic_search or semantic_inspect for existing-code discovery; use semantic_review for changed-code evidence.",
+      "Use semantic_query or semantic_inspect for existing-code discovery; use semantic_review for changed-code evidence.",
       "If scope points to a nested git repo, semantic_review runs inside that repo.",
       "Treat output as bounded diff evidence; read exact ranges before detailed fix claims.",
     ],
@@ -681,7 +825,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     description: "Open a target to read exact source code via srcwalk show. Pass search_id/inspect_id + candidate_id, or a direct path:line target. Supports multi-target like 'a.ts:10,b.ts:20-30'.",
     promptSnippet: "Open exact source code with semantic_show",
     promptGuidelines: [
-      "Use semantic_show after semantic_search or semantic_inspect to read one exact source candidate.",
+      "Use semantic_show after semantic_query or semantic_inspect to read one exact source candidate.",
       "Pass search_id/inspect_id + candidate_id, or pass target directly for stateless use.",
     ],
     parameters: ShowParams,
@@ -711,11 +855,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         cleanupSearches();
         const record = recentSearches.get(registryId);
         if (!record) {
-          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" not found or expired. Run semantic_search/semantic_inspect again or pass target directly.` }] };
+          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" not found or expired. Run semantic_query/semantic_inspect again or pass target directly.` }] };
         }
         // Repo safety check
         if (path.resolve(record.repo) !== path.resolve(ctx.cwd)) {
-          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" belongs to a different repo. Run semantic_search/semantic_inspect again in this repo or pass a direct target.` }] };
+          return { content: [{ type: "text", text: `semantic_show: id "${registryId}" belongs to a different repo. Run semantic_query/semantic_inspect again in this repo or pass a direct target.` }] };
         }
         record.lastAccess = Date.now();
         repo = record.repo;
@@ -778,32 +922,37 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "",
       "## Tools — semantic_* contract",
       "",
-      "Default to `semantic_*` first for code-structure work.",
-      "`read`/`glob`/`grep` only for raw-text confirmation or when",
-      "semantic_* lacks support. If you bypass them, say why.",
+      "Default to `semantic_query` for code-structure discovery and `semantic_grep` for raw text/regex search.",
+      "Do not use built-in `grep` by default; pi-srcwalk supersedes it with `semantic_grep`.",
+      "Use `read` only for exact source confirmation after a semantic tool returns a target.",
       "",
       "### Contract",
       "",
-      "1. **semantic_search** — discovery + NL routing:",
+      "1. **semantic_query** — discovery + NL routing:",
       "   NL query → auto-detect intent (overview, deps, tests,",
       "   fuzzy symbol lookup). Use when target is unclear.",
       "   For exact known symbols, use semantic_inspect.",
-      "2. **semantic_inspect** — known symbol(s) deep inspect:",
+      "2. **semantic_grep** — deterministic text/regex search:",
+      "   Zoekt-lite path: literal/regex → trigram candidate prune",
+      "   when anchors are strong → verify exact line matches;",
+      "   full-scan fallback when regex is too weak or complex.",
+      "3. **semantic_inspect** — known symbol(s) deep inspect:",
       "   context + callers + callees + references in one shot.",
       "   Accepts one symbol or up to 3 symbols. Runs srcwalk context,",
       "   relation traces, and refs.",
-      "3. **semantic_show** — exact source read via srcwalk show:",
+      "4. **semantic_show** — exact source read via srcwalk show:",
       "   path:line or id + candidate. Fixed -C 12 surrounding source lines.",
       "   For structural context of a known symbol, use semantic_inspect.",
-      "4. **semantic_review** — verify changes. staged | working-tree.",
-      "5. Respect confidence: `abstained: true` → no strong match.",
-      "6. Follow search/inspect IDs. Don't retype paths.",
-      "7. If you bypass semantic_* for a code claim, say why.",
+      "5. **semantic_review** — verify changes. staged | working-tree.",
+      "6. Respect confidence: `abstained: true` → no strong match.",
+      "7. Follow search/inspect IDs. Don't retype paths.",
+      "8. If you bypass semantic_* for a code claim, say why.",
       "",
-      "### Before read/find/grep",
+      "### Before read/find/raw-text",
       "",
-      "- `ls`/`tree`/`find` → `semantic_search`",
-      "- `rg \"foo\\(\"` → `semantic_search` (unknown symbol) or `semantic_inspect` (known)",
+      "- `ls`/`tree`/`find` → `semantic_query`",
+      "- raw text or regex search → `semantic_grep`",
+      "- `rg \"foo\\(\"` / built-in `grep` → `semantic_grep` unless unsupported",
       "- Blind `read` → `semantic_show` with search/inspect_id + candidate",
       "",
       SENTINEL_END,

@@ -10,13 +10,13 @@ function commandLine(result: CommandResult): string {
 export function formatResult(result: SearchResult, verbose = false): string {
   const { plan, confidence } = result;
   const lines: string[] = [
-    `# semantic-search ts: ${plan.rawQuery ?? plan.query}`,
+    `# semantic-query ts: ${plan.rawQuery ?? plan.query}`,
     `repo: ${plan.repo}`,
     `scope: ${plan.scope}`,
     `intent: ${plan.intent}; kind: ${plan.queryKind}; keywords: ${JSON.stringify(plan.keywords)}`,
     "",
     "## Retrieval confidence",
-    "- source: semantic_search ranking; srcwalk evidence packets keep their own evidence confidence",
+    "- source: semantic_query ranking; srcwalk evidence packets keep their own evidence confidence",
     `- level: ${confidence.level}`,
     `- abstained: ${confidence.abstained}`,
     `- reason: ${confidence.reason}`,
