@@ -38,6 +38,7 @@
   },
   "scripts": {
     "check:ts": "tsc --noEmit",
+    "test": "node --no-deprecation --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\"));' --test tests/**/*.test.ts",
     "smoke": "node --loader ts-node/esm src/cli.ts"
   },
   "peerDependencies": {
