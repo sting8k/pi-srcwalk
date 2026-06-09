@@ -5,6 +5,7 @@ import { executeSearch } from "../../src/engine.js";
 import { executeSemanticGrep, formatSemanticGrepResult } from "../../src/grep/semantic-grep.js";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
 import { formatResult } from "../../src/output/format.js";
+import { fencedCodeBlock } from "../../src/output/code-fence.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 import { commandDisplay } from "../../src/router/intent.js";
 import { runCommand } from "../../src/srcwalk/runner.js";
@@ -280,27 +281,30 @@ async function inspectOneSymbol(
   return { results, targets: Array.from(targets) };
 }
 
+function appendInspectResultSection(sections: string[], result: { code: number; output: string; command: SrcwalkCommand }): void {
+  const label = result.command.label;
+  const isContext = label.startsWith("context:");
+  const isCallers = label.startsWith("trace-callers");
+  const isCallees = label.startsWith("trace-callees");
+  const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
+  sections.push(`## ${section}`);
+  const out = result.output.trim();
+  if (result.code !== 0) {
+    sections.push(`(command failed code=${result.code})`);
+  } else if (out) {
+    const fenceTarget = isContext ? parseInspectTargets(out) : undefined;
+    sections.push(...fencedCodeBlock(out, fenceTarget && fenceTarget.length ? fenceTarget : undefined));
+  } else {
+    sections.push("(none)");
+  }
+  sections.push("");
+}
+
 function formatInspectPacket(repo: string, symbol: string, relation: string, scope: string, traceScope: string, results: Array<{ code: number; output: string; command: SrcwalkCommand }>): string {
   const sections = [`# semantic-inspect: ${symbol}`, `repo: ${repo}`, `relation: ${relation}`, `scope: ${scope}`];
   if (traceScope !== scope) sections.push(`trace_scope: ${traceScope} (file scope adjusted for callers/callees)`);
   sections.push("");
-  for (const r of results) {
-    const label = r.command.label;
-    const isContext = label.startsWith("context:");
-    const isCallers = label.startsWith("trace-callers");
-    const isCallees = label.startsWith("trace-callees");
-    const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
-    sections.push(`## ${section}`);
-    const out = r.output.trim();
-    if (r.code !== 0) {
-      sections.push(`(command failed code=${r.code})`);
-    } else if (out) {
-      sections.push(out);
-    } else {
-      sections.push("(none)");
-    }
-    sections.push("");
-  }
+  for (const r of results) appendInspectResultSection(sections, r);
   return sections.join("\n");
 }
 
@@ -429,9 +433,7 @@ function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: Revie
     `- [${status}, ${result.elapsedMs}ms] ${commandDisplay(result.command)}`,
     "",
     "## Review evidence",
-    "```text",
-    result.output.trim() || "(no review output)",
-    "```",
+    ...fencedCodeBlock(result.output.trim() || "(no review output)"),
     "",
   ].join("\n");
 }
@@ -701,23 +703,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         sections.push("");
         for (const sr of symbolResults) {
           sections.push(`# Symbol: ${sr.symbol}`);
-          for (const r of sr.results) {
-            const label = r.command.label;
-            const isContext = label.startsWith("context:");
-            const isCallers = label.startsWith("trace-callers");
-            const isCallees = label.startsWith("trace-callees");
-            const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
-            sections.push(`## ${section}`);
-            const out = r.output.trim();
-            if (r.code !== 0) {
-              sections.push(`(command failed code=${r.code})`);
-            } else if (out) {
-              sections.push(out);
-            } else {
-              sections.push("(none)");
-            }
-            sections.push("");
-          }
+          for (const r of sr.results) appendInspectResultSection(sections, r);
         }
         packet = `inspect_id: ${inspectId}\n\n${sections.join("\n")}`;
       } else {
@@ -891,9 +877,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         "",
       ].join("\n");
 
+      const outputBlock = fencedCodeBlock(result.output.trim(), target).join("\n");
       const packet = result.code === 0
-        ? header + result.output.trim()
-        : header + `(command failed code=${result.code})\n\n${result.output.trim()}`;
+        ? `${header}${outputBlock}`
+        : `${header}(command failed code=${result.code})\n\n${outputBlock}`;
 
       const truncated = await truncateForTool(packet);
 

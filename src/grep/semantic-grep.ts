@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { iterFiles } from "../index/files.js";
 import { validateScope } from "../router/intent.js";
 import { runAbortableSingleFlight, runWithRepoBuildQueue, type AbortableFlight } from "../cache/build-coordinator.js";
+import { fencedCodeBlock } from "../output/code-fence.js";
 
 export type SemanticGrepBackend = "trigram-index" | "full-scan" | "invalid-regex";
 
@@ -497,12 +498,12 @@ export function formatSemanticGrepResult(result: SemanticGrepResult): string {
   } else {
     const withContext = result.matches.some((match) => match.before.length || match.after.length);
     for (const group of groupMatches(result.matches)) {
-      lines.push(`### ${group.path} — ${group.matches.length} shown`, "```text");
+      const blockLines: string[] = [];
       group.matches.forEach((match, idx) => {
-        lines.push(...matchLines(match, withContext));
-        if (withContext && idx < group.matches.length - 1) lines.push("");
+        blockLines.push(...matchLines(match, withContext));
+        if (withContext && idx < group.matches.length - 1) blockLines.push("");
       });
-      lines.push("```", "");
+      lines.push(`### ${group.path} — ${group.matches.length} shown`, ...fencedCodeBlock(blockLines.join("\n"), group.path), "");
     }
   }
   return lines.join("\n");

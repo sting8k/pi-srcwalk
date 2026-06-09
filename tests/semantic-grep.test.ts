@@ -100,6 +100,7 @@ test("formatSemanticGrepResult groups shown matches by file", async () => {
   assert.match(formatted, /## Matches by file/);
   assert.match(formatted, /### src\/a\.ts — 2 shown/);
   assert.match(formatted, /### src\/b\.ts — 1 shown/);
+  assert.match(formatted, /```ts\n1\| ABC-212 first/);
 });
 
 test("semantic_grep reports cache and search metrics on repeated calls", async () => {

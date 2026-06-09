@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { codeFenceLanguage, fencedCodeBlock } from "../src/output/code-fence.js";
 import { formatResult } from "../src/output/format.js";
 import type { Candidate, CommandResult, QueryPlan, SearchResult } from "../src/domain/types.js";
 
@@ -104,6 +105,42 @@ test("formatResult groups normal evidence expansions by file and trace label", (
   assert.match(formatted, /- \[ok, 3ms\] show 30-40 — show a/);
   assert.match(formatted, /### callers — 1 expansion/);
   assert.match(formatted, /### callees — 1 expansion/);
+});
+
+test("code fence helper infers one language and falls back to text for mixed targets", () => {
+  assert.equal(codeFenceLanguage("src/a.ts:10-20"), "ts");
+  assert.equal(codeFenceLanguage("README.md:1"), "markdown");
+  assert.equal(codeFenceLanguage(["src/a.ts:10", "src/b.ts:20"]), "ts");
+  assert.equal(codeFenceLanguage(["src/a.ts:10", "README.md:1"]), "text");
+  assert.deepEqual(fencedCodeBlock("const a = 1;", "src/a.ts"), ["```ts", "const a = 1;", "```"]);
+  assert.deepEqual(fencedCodeBlock("````", "README.md"), ["`````markdown", "````", "`````"]);
+});
+
+test("formatResult labels deep source expansion fences from expansion targets", () => {
+  const result: SearchResult = {
+    plan: { ...basePlan, detail: "deep" },
+    commandResults: [],
+    candidates: [],
+    expansions: [
+      command("context:src/a.ts:10-20", "context", "const a = 1;"),
+      command("callers:runThing", "trace", "trace callers"),
+    ],
+    notes: [],
+    confidence: {
+      level: "medium",
+      abstained: false,
+      reason: "test",
+      topScore: 0,
+      topGap: 0,
+      topFileCluster: 0,
+      pathKeywordCoverage: 0,
+    },
+  };
+
+  const formatted = formatResult(result);
+
+  assert.match(formatted, /```ts\nconst a = 1;\n```/);
+  assert.match(formatted, /```text\ntrace callers\n```/);
 });
 
 test("formatResult includes cache metrics section when cache stats exist", () => {

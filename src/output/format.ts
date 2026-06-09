@@ -1,5 +1,6 @@
 import type { Candidate, CommandResult, SearchResult } from "../domain/types.js";
 import { commandDisplay, describeQueryIR } from "../router/intent.js";
+import { fencedCodeBlock } from "./code-fence.js";
 
 function commandLine(result: CommandResult): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
@@ -15,6 +16,10 @@ function expansionTarget(label: string): string {
 function expansionGroupKey(result: CommandResult): string {
   if (result.command.parseAs === "trace") return result.command.label.split(":")[0] ?? result.command.label;
   return candidateFile(expansionTarget(result.command.label));
+}
+
+function expansionFenceTarget(result: CommandResult): string | undefined {
+  return result.command.parseAs === "show" || result.command.parseAs === "context" ? expansionTarget(result.command.label) : undefined;
 }
 
 function expansionTitle(result: CommandResult): string {
@@ -153,7 +158,7 @@ export function formatResult(result: SearchResult, verbose = false): string {
       } else {
         for (const expansion of group.expansions) {
           lines.push(`- [${expansion.code === 0 ? "ok" : `code=${expansion.code}`}, ${expansion.elapsedMs}ms] ${expansionTitle(expansion)}`);
-          lines.push("```text", expansion.output.trim(), "```", "");
+          lines.push(...fencedCodeBlock(expansion.output.trim(), expansionFenceTarget(expansion)), "");
         }
       }
       lines.push("");
