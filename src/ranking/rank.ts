@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { Candidate, QueryPlan } from "../domain/types.js";
-import { CODE_EXTS, DOC_EXTS } from "../router/constants.js";
+import { CODE_EXTS, DOC_EXTS, LANG_EXTS } from "../router/constants.js";
 import { domainKeywords, strongSymbolAnchors } from "../router/intent.js";
+import { tokenize } from "../index/tokenize.js";
 import { candidateFile } from "../srcwalk/parse.js";
 
 const RRF_K = 60;
@@ -13,6 +14,37 @@ function isTestTarget(target: string): boolean {
 
 function isExplanationQuery(plan: QueryPlan): boolean {
   return ["general", "definition", "related"].includes(plan.intent) && /\b(how|work|works|implementation|implemented|calculate|calculation|manage|flow)\b/i.test(plan.query);
+}
+
+function isGeneratedOrVendor(file: string): boolean {
+  return /(?:^|[\\/_.-])(node_modules|vendor|generated|dist|build|target|coverage)(?:[\\/_.-]|$)|\.generated\./i.test(file);
+}
+
+function queryTerms(plan: QueryPlan): string[] {
+  const terms = tokenize(domainKeywords(plan).join(" "));
+  if (terms.length) return [...new Set(terms)];
+  return domainKeywords(plan).map((k) => k.toLowerCase());
+}
+
+function pathTerms(file: string): Set<string> {
+  return new Set(tokenize(file.replace(/[\\/]/g, " ")));
+}
+
+function symbolTerms(symbol: string | undefined): Set<string> {
+  return new Set(tokenize(symbol ?? ""));
+}
+
+function langMatches(file: string, lang: string): boolean {
+  const exts = LANG_EXTS[lang.toLowerCase()];
+  return Boolean(exts?.includes(path.extname(file.toLowerCase())));
+}
+
+function fileHintMatches(file: string, hint: string): boolean {
+  const lowFile = file.toLowerCase();
+  const lowHint = hint.toLowerCase().trim().replace(/^['`"]|['`"]$/g, "");
+  if (!lowHint) return false;
+  if (lowFile.includes(lowHint)) return true;
+  return path.basename(lowFile) === path.basename(lowHint);
 }
 
 export function exactSymbolAnchorMatches(plan: QueryPlan, cand: Candidate): string[] {
@@ -42,16 +74,25 @@ export function dedupeRanked(candidates: Candidate[]): Candidate[] {
 }
 
 export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candidate[] {
-  const kws = domainKeywords(plan).map((k) => k.toLowerCase());
+  const kws = queryTerms(plan);
+  const ir = plan.queryIR;
   for (const cand of candidates) {
+    const file = candidateFile(cand);
     const target = cand.target.toLowerCase();
-    const basename = path.basename(candidateFile(cand)).toLowerCase();
+    const basename = path.basename(file).toLowerCase();
+    const stem = path.parse(file).name.toLowerCase();
+    const symbol = (cand.symbol ?? "").toLowerCase();
+    const pterms = pathTerms(file);
+    const sterms = symbolTerms(cand.symbol);
+
     if (["definition", "grouped-definition", "exact-context"].includes(cand.source)) cand.score += 25;
+
     const exactAnchors = exactSymbolAnchorMatches(plan, cand);
     if (exactAnchors.length && (["definition", "grouped-definition"].includes(cand.source) || cand.commandLabel.startsWith("symbol-exact"))) {
       cand.score += 95 + exactAnchors.length * 10;
       cand.evidence.push(`boost: exact symbol anchor ${exactAnchors.join(",")}`);
     }
+
     if (["ts-bm25", "ts-bm25-prf"].includes(cand.source)) cand.score += 15;
     if (cand.source === "file-discover") {
       if (kws.some((kw) => basename.includes(kw))) {
@@ -62,7 +103,49 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
         cand.evidence.push("boost: path matches query keyword");
       }
     }
-    if (kws.some((kw) => target.includes(kw) || (cand.symbol ?? "").toLowerCase().includes(kw))) cand.score += 12;
+
+    if (kws.some((kw) => target.includes(kw) || symbol.includes(kw))) cand.score += 12;
+
+    const symbolHits = kws.filter((kw) => sterms.has(kw) || (symbol && symbol.includes(kw)));
+    if (symbolHits.length) {
+      const boost = Math.min(42, 16 * symbolHits.length + (["definition", "grouped-definition"].includes(cand.source) ? 12 : 0));
+      cand.score += boost;
+      cand.evidence.push(`boost: symbol token hit ${symbolHits.slice(0, 4).join(",")} (+${boost.toFixed(0)})`);
+    }
+
+    const basenameHits = kws.filter((kw) => basename.includes(kw) || stem.includes(kw));
+    if (basenameHits.length) {
+      const boost = Math.min(54, 22 + 12 * basenameHits.length);
+      cand.score += boost;
+      cand.evidence.push(`boost: basename hit ${basenameHits.slice(0, 4).join(",")} (+${boost.toFixed(0)})`);
+    }
+
+    const pathHits = kws.filter((kw) => pterms.has(kw));
+    if (pathHits.length) {
+      const coverage = pathHits.length / Math.max(1, kws.length);
+      const boost = Math.min(44, 8 * pathHits.length + 18 * coverage);
+      cand.score += boost;
+      cand.evidence.push(`boost: path token coverage ${pathHits.length}/${kws.length} (+${boost.toFixed(0)})`);
+    }
+
+    const boundaryHits = kws.filter((kw) => new RegExp(`(?<![A-Za-z0-9])${kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`).test(target));
+    if (boundaryHits.length) {
+      const boost = Math.min(24, 6 * boundaryHits.length);
+      cand.score += boost;
+      cand.evidence.push(`boost: word-boundary path hit ${boundaryHits.slice(0, 4).join(",")} (+${boost.toFixed(0)})`);
+    }
+
+    if (["definition", "grouped-definition"].includes(cand.source)) {
+      cand.score += 18;
+      cand.evidence.push("boost: structural definition source (+18)");
+    } else if (["exact-context", "next-context"].includes(cand.source)) {
+      cand.score += 10;
+      cand.evidence.push("boost: structural context source (+10)");
+    } else if (["sqlite-fts", "sqlite-fts-prf", "ts-bm25", "ts-bm25-prf", "bm25", "bm25-prf"].includes(cand.source)) {
+      cand.score += 10;
+      cand.evidence.push("boost: lexical retriever candidate (+10)");
+    }
+
     const testTarget = isTestTarget(target);
     if (plan.intent === "test" && testTarget) cand.score += 20;
     if (plan.intent !== "test" && testTarget) {
@@ -70,9 +153,75 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
       cand.score -= penalty;
       cand.evidence.push(`penalty: non-test query matched test-like path (-${penalty})`);
     }
-    if (["general", "definition"].includes(plan.intent) && ["rank", "ranking", "score", "scoring"].some((kw) => kws.includes(kw)) && /rank|score|search\/rank/.test(target)) {
+
+    if (ir) {
+      const fileHits = ir.fileFilters.filter((hint) => fileHintMatches(file, hint));
+      if (fileHits.length) {
+        const boost = 72 + 12 * Math.min(2, fileHits.length - 1);
+        cand.score += boost;
+        cand.evidence.push(`boost: file/path hint matched ${fileHits.slice(0, 2).join(",")} (+${boost.toFixed(0)})`);
+      } else if (ir.fileFilters.length) {
+        cand.score -= 18;
+        cand.evidence.push("penalty: missed file/path hint (-18)");
+      }
+
+      const symbolHitsHint = ir.symbols.filter((hint) => hint.toLowerCase() === symbol || target.includes(hint.toLowerCase()));
+      if (symbolHitsHint.length) {
+        const boost = 78 + (["definition", "grouped-definition", "exact-context"].includes(cand.source) ? 24 : 0);
+        cand.score += boost;
+        cand.evidence.push(`boost: sym hint matched ${symbolHitsHint.slice(0, 2).join(",")} (+${boost.toFixed(0)})`);
+      } else if (ir.symbols.length) {
+        cand.score -= 12;
+        cand.evidence.push("penalty: missed sym hint (-12)");
+      }
+
+      if (ir.lang) {
+        if (langMatches(file, ir.lang)) {
+          cand.score += 24;
+          cand.evidence.push(`boost: lang hint matched ${ir.lang} (+24)`);
+        } else if (LANG_EXTS[ir.lang]) {
+          cand.score -= 8;
+          cand.evidence.push(`penalty: missed lang hint ${ir.lang} (-8)`);
+        }
+      }
+
+      if (ir.includeTests && testTarget) {
+        cand.score += 38;
+        cand.evidence.push("boost: test hint matched test-like path (+38)");
+      } else if (ir.includeTests && !testTarget) {
+        cand.score -= 10;
+        cand.evidence.push("penalty: test hint with non-test path (-10)");
+      }
+      if (ir.excludeTests && testTarget) {
+        cand.score -= 60;
+        cand.evidence.push("penalty: -test excluded test-like path (-60)");
+      }
+
+      const contentHits = tokenize(ir.contentTerms.join(" ")).filter((t) => target.includes(t) || symbol.includes(t));
+      if (contentHits.length) {
+        const boost = Math.min(30, 10 * contentHits.length);
+        cand.score += boost;
+        cand.evidence.push(`boost: content hint path/symbol hit ${contentHits.slice(0, 3).join(",")} (+${boost.toFixed(0)})`);
+      }
+    }
+
+    if (["general", "definition", "related"].includes(plan.intent) && ["rank", "ranking", "score", "scoring"].some((kw) => kws.includes(kw)) && /rank|score|search\/rank/.test(target)) {
       cand.score += 20;
       cand.evidence.push("boost: ranking/scoring path");
+    }
+
+    if (["general", "definition", "related"].includes(plan.intent)) {
+      if (isCodeFile(file)) {
+        cand.score += 8;
+        cand.evidence.push("boost: code file for code-intent query (+8)");
+      } else if (isDocFile(file)) {
+        cand.score -= 10;
+        cand.evidence.push("penalty: doc file for code-intent query (-10)");
+      }
+    }
+    if (isGeneratedOrVendor(file)) {
+      cand.score -= 38;
+      cand.evidence.push("penalty: generated/vendor/build-like path (-38)");
     }
   }
   return candidates.sort((a, b) => b.score - a.score);

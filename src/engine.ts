@@ -17,14 +17,28 @@ export interface ExecuteSearchOptions {
   signal?: AbortSignal;
 }
 
+function dedupeCommands(commands: SrcwalkCommand[]): SrcwalkCommand[] {
+  const seen = new Set<string>();
+  const out: SrcwalkCommand[] = [];
+  for (const command of commands) {
+    const key = `${command.label}\u0000${command.args.join("\u0000")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(command);
+  }
+  return out;
+}
+
 function srcwalkCommandsForPlan(plan: ReturnType<typeof buildPlan>, bm25Candidates: Candidate[]): SrcwalkCommand[] {
+  const hintCommands = plan.commands.filter((c) => c.label.startsWith("hint-"));
+  const regularCommands = plan.commands.filter((c) => !c.label.startsWith("hint-"));
   if (!bm25Candidates.length) return plan.commands;
   if (["general", "definition", "test", "related"].includes(plan.intent)) {
-    const exactSymbols = plan.commands.filter((c) => c.label.startsWith("symbol-exact"));
-    if (exactSymbols.length) return exactSymbols.slice(0, 3);
-    return plan.commands.filter((c) => c.label.startsWith("symbol-") && c.label !== "text-any").slice(0, 1);
+    const exactSymbols = regularCommands.filter((c) => c.label.startsWith("symbol-exact"));
+    if (exactSymbols.length) return dedupeCommands([...hintCommands, ...exactSymbols.slice(0, 3)]);
+    return dedupeCommands([...hintCommands, ...regularCommands.filter((c) => c.label.startsWith("symbol-") && c.label !== "text-any").slice(0, 1)]);
   }
-  return plan.commands;
+  return dedupeCommands([...hintCommands, ...regularCommands]);
 }
 
 function extraFusionCommands(plan: ReturnType<typeof buildPlan>): SrcwalkCommand[] {
