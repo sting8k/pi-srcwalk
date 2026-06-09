@@ -1,5 +1,5 @@
 import type { CommandResult, SearchResult } from "../domain/types.js";
-import { commandDisplay } from "../router/intent.js";
+import { commandDisplay, describeQueryIR } from "../router/intent.js";
 
 function commandLine(result: CommandResult): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
@@ -10,7 +10,7 @@ function commandLine(result: CommandResult): string {
 export function formatResult(result: SearchResult, verbose = false): string {
   const { plan, confidence } = result;
   const lines: string[] = [
-    `# semantic-search ts: ${plan.query}`,
+    `# semantic-search ts: ${plan.rawQuery ?? plan.query}`,
     `repo: ${plan.repo}`,
     `scope: ${plan.scope}`,
     `intent: ${plan.intent}; kind: ${plan.queryKind}; keywords: ${JSON.stringify(plan.keywords)}`,
@@ -27,7 +27,8 @@ export function formatResult(result: SearchResult, verbose = false): string {
     lines.push("## Cache", `- cache_kind: ${result.cache.cacheKind}`, `- cache_hit: ${result.cache.cacheHit}`, `- chunks: ${result.cache.chunks}; files: ${result.cache.files}; estimated_mem_mb: ${(result.cache.sizeBytes / (1024 * 1024)).toFixed(2)}`, `- cache_location: ${result.cache.cacheLocation}`, "");
   }
   lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
-  if (result.notes.length) lines.push("## Notes", ...result.notes.map((note) => `- ${note}`), "");
+  const notes = plan.queryIR?.hasHints ? [`QueryIR: ${describeQueryIR(plan.queryIR)}`, ...result.notes] : result.notes;
+  if (notes.length) lines.push("## Notes", ...notes.map((note) => `- ${note}`), "");
   lines.push("## Best candidates");
   if (!result.candidates.length) lines.push("- none parsed");
   result.candidates.forEach((cand, idx) => {

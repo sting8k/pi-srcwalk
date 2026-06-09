@@ -26,3 +26,16 @@ export const CODE_EXTS = new Set([
 
 export const DOC_EXTS = new Set([".md", ".mdx", ".rst", ".toml", ".yaml", ".yml", ".json"]);
 export const INDEX_EXTS = new Set([...CODE_EXTS, ...DOC_EXTS]);
+export const LANG_EXTS: Record<string, string[]> = {
+  csharp: [".cs"],
+  cs: [".cs"],
+  go: [".go"],
+  javascript: [".js", ".jsx"],
+  js: [".js", ".jsx"],
+  python: [".py"],
+  py: [".py"],
+  rust: [".rs"],
+  rs: [".rs"],
+  typescript: [".ts", ".tsx"],
+  ts: [".ts", ".tsx"],
+};

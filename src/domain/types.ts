@@ -10,8 +10,23 @@ export interface SrcwalkCommand {
   parseAs: ParseMode;
 }
 
+export interface QueryIR {
+  rawQuery: string;
+  cleanQuery: string;
+  terms: string[];
+  symbols: string[];
+  fileFilters: string[];
+  contentTerms: string[];
+  lang?: string;
+  includeTests: boolean;
+  excludeTests: boolean;
+  hasHints: boolean;
+}
+
 export interface QueryPlan {
   query: string;
+  rawQuery?: string;
+  queryIR?: QueryIR;
   repo: string;
   scope: string;
   intent: Intent;
