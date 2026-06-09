@@ -4,6 +4,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { iterFiles } from "../index/files.js";
 import { validateScope } from "../router/intent.js";
+import { runAbortableSingleFlight, runWithRepoBuildQueue, type AbortableFlight } from "../cache/build-coordinator.js";
 
 export type SemanticGrepBackend = "trigram-index" | "full-scan" | "invalid-regex";
 
@@ -72,11 +73,14 @@ interface GrepIndex {
   cacheLocation: string;
 }
 
+type GrepBuildResult = { index: GrepIndex; cacheHit: boolean; buildMs: number };
+
 const MAX_CONTEXT_LINES = 5;
 const DEFAULT_MAX_RESULTS = 100;
 const MAX_MAX_RESULTS = 500;
 const MAX_CACHE_ENTRIES = 4;
 const grepCache = new Map<string, GrepIndex>();
+const grepBuilds = new Map<string, AbortableFlight<GrepBuildResult>>();
 
 function normalizeRel(repo: string, file: string): string {
   return path.relative(repo, file).split(path.sep).join("/");
@@ -86,9 +90,10 @@ function cacheKey(repo: string, scope: string, glob?: string): string {
   return crypto.createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${glob ?? ""}\nsemantic-grep-v1`).digest("hex").slice(0, 20);
 }
 
-async function fingerprintFiles(repo: string, files: string[]): Promise<string> {
+async function fingerprintFiles(repo: string, files: string[], signal?: AbortSignal): Promise<string> {
   const h = crypto.createHash("sha256");
   for (const file of files) {
+    if (signal?.aborted) throw new Error("semantic_grep aborted");
     const s = await stat(file).catch(() => undefined);
     if (!s) continue;
     h.update(normalizeRel(repo, file)).update("\0").update(String(s.size)).update("\0").update(String(s.mtimeMs)).update("\n");
@@ -154,9 +159,14 @@ function addPostings(postings: Map<string, Set<number>>, text: string, fileId: n
   }
 }
 
-async function candidateFiles(repo: string, scope: string, glob?: string): Promise<string[]> {
-  const files = await iterFiles(repo, scope);
-  return files.filter((file) => matchesGlob(normalizeRel(repo, file), glob));
+async function candidateFiles(repo: string, scope: string, glob?: string, signal?: AbortSignal): Promise<string[]> {
+  const files = await iterFiles(repo, scope, signal);
+  const out: string[] = [];
+  for (const file of files) {
+    if (signal?.aborted) throw new Error("semantic_grep aborted");
+    if (matchesGlob(normalizeRel(repo, file), glob)) out.push(file);
+  }
+  return out;
 }
 
 function touchCache(key: string, index: GrepIndex): void {
@@ -169,11 +179,21 @@ function touchCache(key: string, index: GrepIndex): void {
   }
 }
 
-async function buildOrLoadGrepIndex(repo: string, scope: string, glob: string | undefined, signal?: AbortSignal): Promise<{ index: GrepIndex; cacheHit: boolean; buildMs: number }> {
-  const started = performance.now();
+async function buildOrLoadGrepIndex(repo: string, scope: string, glob: string | undefined, signal?: AbortSignal): Promise<GrepBuildResult> {
+  if (signal?.aborted) throw new Error("semantic_grep aborted");
   const key = cacheKey(repo, scope, glob);
-  const files = await candidateFiles(repo, scope, glob);
-  const fingerprint = await fingerprintFiles(repo, files);
+  return runAbortableSingleFlight(grepBuilds, key, signal, "semantic_grep aborted", (buildSignal) =>
+    runWithRepoBuildQueue(repo, () => buildOrLoadGrepIndexUncoordinated(repo, scope, glob, key, buildSignal)),
+  );
+}
+
+async function buildOrLoadGrepIndexUncoordinated(repo: string, scope: string, glob: string | undefined, key: string, signal: AbortSignal): Promise<GrepBuildResult> {
+  const started = performance.now();
+  if (signal.aborted) throw new Error("semantic_grep aborted");
+  const files = await candidateFiles(repo, scope, glob, signal);
+  if (signal.aborted) throw new Error("semantic_grep aborted");
+  const fingerprint = await fingerprintFiles(repo, files, signal);
+  if (signal.aborted) throw new Error("semantic_grep aborted");
   const cached = grepCache.get(key);
   if (cached?.fingerprint === fingerprint) {
     touchCache(key, cached);
@@ -184,7 +204,7 @@ async function buildOrLoadGrepIndex(repo: string, scope: string, glob: string | 
   const postings = new Map<string, Set<number>>();
   let sizeBytes = 0;
   for (const file of files) {
-    if (signal?.aborted) throw new Error("semantic_grep aborted");
+    if (signal.aborted) throw new Error("semantic_grep aborted");
     const text = await readFile(file, "utf8").catch(() => undefined);
     if (text === undefined) continue;
     const rel = normalizeRel(repo, file);
@@ -327,6 +347,7 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
   const notes: string[] = [];
 
   const { index, cacheHit, buildMs } = await buildOrLoadGrepIndex(repo, scope, options.glob, options.signal);
+  if (options.signal?.aborted) throw new Error("semantic_grep aborted");
   const anchorPlan = anchorsFor(pattern, literal);
   const backend: SemanticGrepBackend = anchorPlan.canPrune ? "trigram-index" : "full-scan";
   if (anchorPlan.reason) notes.push(anchorPlan.reason);

@@ -4,6 +4,7 @@ import path from "node:path";
 import type { LexicalIndex } from "../domain/types.js";
 import { iterFiles } from "./files.js";
 import { tokenize } from "./tokenize.js";
+import { runSingleFlight, runWithRepoBuildQueue } from "../cache/build-coordinator.js";
 
 const CACHE_VERSION = "ts-memory-compact-bm25-2026-06-03";
 const CHUNK_LINES = 80;
@@ -20,6 +21,7 @@ interface MemoryEntry {
 }
 
 const memoryCache = new Map<string, MemoryEntry>();
+const indexBuilds = new Map<string, Promise<LexicalIndex>>();
 
 export function cacheRoot(): string {
   return "memory";
@@ -152,9 +154,13 @@ function buildDocTerms(offsetsRaw: number[], termIdsRaw: number[], freqsRaw: num
 }
 
 export async function buildOrLoadIndex(repoInput: string, scope: string): Promise<LexicalIndex> {
-  const started = performance.now();
   const repo = path.resolve(repoInput);
   const key = cacheKey(repo, scope);
+  return runSingleFlight(indexBuilds, key, () => runWithRepoBuildQueue(repo, () => buildOrLoadIndexUncoordinated(repo, scope, key)));
+}
+
+async function buildOrLoadIndexUncoordinated(repo: string, scope: string, key: string): Promise<LexicalIndex> {
+  const started = performance.now();
   const location = `memory:${key}`;
   const { fingerprint, files } = await fingerprintFiles(repo, scope);
   const cached = memoryCache.get(key);
