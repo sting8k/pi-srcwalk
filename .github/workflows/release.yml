@@ -94,6 +94,9 @@ jobs:
     permissions:
       contents: write # create GitHub release
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Create GitHub release if missing
         env:
           GH_TOKEN: ${{ github.token }}
