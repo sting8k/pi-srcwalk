@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.1] - 2026-06-09
+
+### Fixed
+- Coordinated lazy cache builds with same-key single-flight and per-repo build queueing to avoid duplicate first-hit cache work.
+- Propagated abort signals through cache preparation paths so cancelled callers do not hold build work unnecessarily.
+
+### Added
+- Added regression tests for cache build coordination, semantic grep metrics, and grouped formatter output.
+
 ## [1.2.0] - 2026-06-09
 
 ### Added

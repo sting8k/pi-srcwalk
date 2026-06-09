@@ -1,6 +1,6 @@
 {
   "name": "@sting8k/pi-srcwalk",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Agent-friendly srcwalk wrapper for Pi coding agents",
   "type": "module",
   "main": "extensions/pi-srcwalk/index.ts",
@@ -38,6 +38,7 @@
   },
   "scripts": {
     "check:ts": "tsc --noEmit",
+    "test": "node --no-deprecation --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\"));' --test tests/**/*.test.ts",
     "smoke": "node --loader ts-node/esm src/cli.ts"
   },
   "peerDependencies": {

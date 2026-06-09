@@ -10,7 +10,12 @@ const SKIP_DIRS = new Set([
 const SKIP_FILENAMES = new Set(["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "composer.lock", "poetry.lock", "Pipfile.lock", "harness.db"]);
 const MAX_FILE_BYTES = 512_000;
 
-export async function iterFiles(repo: string, scope: string): Promise<string[]> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("file iteration aborted");
+}
+
+export async function iterFiles(repo: string, scope: string, signal?: AbortSignal): Promise<string[]> {
+  throwIfAborted(signal);
   const root = path.resolve(repo, scope === "." ? "" : scope);
   const rootStat = await stat(root).catch(() => undefined);
   if (!rootStat) return [];
@@ -18,8 +23,11 @@ export async function iterFiles(repo: string, scope: string): Promise<string[]> 
 
   const files: string[] = [];
   async function walk(dir: string): Promise<void> {
+    throwIfAborted(signal);
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    throwIfAborted(signal);
     for (const entry of entries) {
+      throwIfAborted(signal);
       const full = path.join(dir, entry.name);
       const rel = path.relative(repo, full).split(path.sep).join("/");
       if (entry.isDirectory()) {
@@ -36,5 +44,6 @@ export async function iterFiles(repo: string, scope: string): Promise<string[]> 
     }
   }
   await walk(root);
+  throwIfAborted(signal);
   return files.sort();
 }
