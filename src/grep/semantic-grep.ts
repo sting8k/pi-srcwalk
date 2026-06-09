@@ -420,6 +420,30 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
   };
 }
 
+function groupMatches(matches: SemanticGrepMatch[]): Array<{ path: string; matches: SemanticGrepMatch[] }> {
+  const groups = new Map<string, SemanticGrepMatch[]>();
+  const order: string[] = [];
+  for (const match of matches) {
+    const existing = groups.get(match.path);
+    if (existing) {
+      existing.push(match);
+      continue;
+    }
+    groups.set(match.path, [match]);
+    order.push(match.path);
+  }
+  return order.map((matchPath) => ({ path: matchPath, matches: groups.get(matchPath) ?? [] }));
+}
+
+function matchLines(match: SemanticGrepMatch, withContext: boolean): string[] {
+  if (!withContext) return [`${match.line}| ${match.text}`];
+  const lines: string[] = [];
+  for (const ctx of match.before) lines.push(` ${ctx.line}| ${ctx.text}`);
+  lines.push(`>${match.line}| ${match.text}`);
+  for (const ctx of match.after) lines.push(` ${ctx.line}| ${ctx.text}`);
+  return lines;
+}
+
 export function formatSemanticGrepResult(result: SemanticGrepResult): string {
   const lines: string[] = [
     `# semantic-grep ts: ${result.pattern}`,
@@ -441,20 +465,18 @@ export function formatSemanticGrepResult(result: SemanticGrepResult): string {
   );
   if (result.error) lines.push("## Error", `- ${result.error}`, "");
   if (result.notes.length) lines.push("## Notes", ...result.notes.map((note) => `- ${note}`), "");
-  lines.push("## Matches");
+  lines.push("## Matches by file");
   if (!result.matches.length) {
     lines.push("- none");
   } else {
-    for (const match of result.matches) {
-      if (match.before.length || match.after.length) {
-        lines.push(`### ${match.path}:${match.line}`, "```text");
-        for (const ctx of match.before) lines.push(` ${ctx.line}| ${ctx.text}`);
-        lines.push(`>${match.line}| ${match.text}`);
-        for (const ctx of match.after) lines.push(` ${ctx.line}| ${ctx.text}`);
-        lines.push("```", "");
-      } else {
-        lines.push(`${match.path}:${match.line}: ${match.text}`);
-      }
+    const withContext = result.matches.some((match) => match.before.length || match.after.length);
+    for (const group of groupMatches(result.matches)) {
+      lines.push(`### ${group.path} — ${group.matches.length} shown`, "```text");
+      group.matches.forEach((match, idx) => {
+        lines.push(...matchLines(match, withContext));
+        if (withContext && idx < group.matches.length - 1) lines.push("");
+      });
+      lines.push("```", "");
     }
   }
   return lines.join("\n");

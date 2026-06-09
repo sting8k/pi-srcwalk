@@ -26,6 +26,7 @@ Expose `semantic_query` as the renamed code-intent discovery tool, add `semantic
 - `semantic_grep` supports literal and regex search with candidate pruning and full-scan fallback.
 - The system prompt contract tells agents to use `semantic_query` for discovery and `semantic_grep` for raw text/regex, not built-in `grep`.
 - README and package metadata reflect the new tool split.
+- `semantic_query` and `semantic_grep` output groups results by file while preserving global candidate IDs for `semantic_show` handoff.
 
 ## Design Notes
 
@@ -34,7 +35,10 @@ Expose `semantic_query` as the renamed code-intent discovery tool, add `semantic
   - `semantic_grep` uses an in-memory trigram index plus exact line verification.
 - Queries:
   - `semantic_query` remains intent-driven.
-  - `semantic_grep` is deterministic and returns file:line matches.
+  - `semantic_grep` is deterministic and returns file:line matches grouped by file.
+- Output detail:
+  - `semantic_query` default `normal` output groups candidates by file and summarizes evidence expansion.
+  - `semantic_query` `deep` output keeps full evidence expansion blocks.
 - API:
   - New Pi tool surface: `semantic_grep`.
 - Domain rules:
@@ -64,3 +68,4 @@ No new harness mechanics yet; story records the tool-surface split and validatio
 - Direct `executeSemanticGrep` smoke weak regex `s.*q` on `README.md` ✅ (`backend=full-scan`)
 - Direct same-process cache smoke ✅ (`first.cacheHit=false`, `second.cacheHit=true`)
 - `semantic_review({ target: "working-tree" })` ✅
+- Grouped output smoke: `semantic_query` renders `## Best candidate files` with compact normal evidence; `--detail deep` keeps full evidence blocks; direct `executeSemanticGrep` renders `## Matches by file` ✅

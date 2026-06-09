@@ -1,10 +1,58 @@
-import type { CommandResult, SearchResult } from "../domain/types.js";
+import type { Candidate, CommandResult, SearchResult } from "../domain/types.js";
 import { commandDisplay, describeQueryIR } from "../router/intent.js";
 
 function commandLine(result: CommandResult): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
   const matches = result.matchCount !== undefined ? `, matches=${result.matchCount}` : "";
   return `- [${status}, ${result.elapsedMs}ms${matches}] ${result.command.label}: ${commandDisplay(result.command)}`;
+}
+
+function expansionSummary(result: CommandResult): string {
+  const status = result.code === 0 ? "ok" : `code=${result.code}`;
+  const preview = result.output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(" | ");
+  const trimmed = preview.length > 140 ? `${preview.slice(0, 137)}...` : preview;
+  return `- [${status}, ${result.elapsedMs}ms] ${result.command.label}${trimmed ? ` — ${trimmed}` : ""}`;
+}
+
+function candidateFile(target: string): string {
+  const idx = target.lastIndexOf(":");
+  return idx > 0 ? target.slice(0, idx) : target;
+}
+
+function candidateSpan(target: string): string {
+  const idx = target.lastIndexOf(":");
+  return idx > 0 ? target.slice(idx + 1) : target;
+}
+
+function candidateLabel(candidate: Candidate): string {
+  return candidate.symbol ?? candidate.kind;
+}
+
+function groupCandidates(candidates: Candidate[]): Array<{ file: string; candidates: Candidate[] }> {
+  const groups = new Map<string, Candidate[]>();
+  const order: string[] = [];
+  for (const candidate of candidates) {
+    const file = candidateFile(candidate.target);
+    const existing = groups.get(file);
+    if (existing) {
+      existing.push(candidate);
+      continue;
+    }
+    groups.set(file, [candidate]);
+    order.push(file);
+  }
+  return order.map((file) => ({ file, candidates: groups.get(file) ?? [] }));
+}
+
+function candidateLine(candidate: Candidate): string {
+  const span = candidateSpan(candidate.target);
+  const label = candidateLabel(candidate);
+  return `${span}: ${label} — score=${candidate.score.toFixed(1)}, source=${candidate.source}, kind=${candidate.kind}`;
 }
 
 export function formatResult(result: SearchResult, verbose = false): string {
@@ -29,17 +77,32 @@ export function formatResult(result: SearchResult, verbose = false): string {
   lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
   const notes = plan.queryIR?.hasHints ? [`QueryIR: ${describeQueryIR(plan.queryIR)}`, ...result.notes] : result.notes;
   if (notes.length) lines.push("## Notes", ...notes.map((note) => `- ${note}`), "");
-  lines.push("## Best candidates");
-  if (!result.candidates.length) lines.push("- none parsed");
-  result.candidates.forEach((cand, idx) => {
-    const symbol = cand.symbol ? ` \`${cand.symbol}\`` : "";
-    lines.push(`${idx + 1}. \`${cand.target}\`${symbol} — score=${cand.score.toFixed(1)}, source=${cand.source}, kind=${cand.kind}`);
-    if (verbose) lines.push(...cand.evidence.map((e) => `   - ${e}`));
-  });
-  lines.push("", "## Evidence expansion");
-  if (!result.expansions.length) lines.push("- none");
-  result.expansions.forEach((exp, idx) => {
-    lines.push(`### Expansion ${idx + 1}: ${exp.command.label} (${exp.code === 0 ? "ok" : `code=${exp.code}`}, ${exp.elapsedMs}ms)`, "```text", exp.output.trim(), "```", "");
-  });
+  lines.push("## Best candidate files");
+  if (!result.candidates.length) {
+    lines.push("- none parsed");
+  } else {
+    for (const group of groupCandidates(result.candidates)) {
+      const best = Math.max(...group.candidates.map((candidate) => candidate.score));
+      const hitWord = group.candidates.length === 1 ? "hit" : "hits";
+      lines.push(`### ${group.file} — ${group.candidates.length} ${hitWord}, best=${best.toFixed(1)}`);
+      for (const candidate of group.candidates) {
+        lines.push(`[${result.candidates.indexOf(candidate) + 1}] ${candidateLine(candidate)}`);
+        if (verbose) lines.push(...candidate.evidence.map((e) => `   - ${e}`));
+      }
+      lines.push("");
+    }
+  }
+  lines.push("## Evidence expansion");
+  if (!result.expansions.length) {
+    lines.push("- none");
+  } else if (plan.detail === "brief") {
+    lines.push(`- ${result.expansions.length} expansion(s) available`);
+  } else if (plan.detail === "normal") {
+    lines.push(...result.expansions.map(expansionSummary));
+  } else {
+    result.expansions.forEach((exp, idx) => {
+      lines.push(`### Expansion ${idx + 1}: ${exp.command.label} (${exp.code === 0 ? "ok" : `code=${exp.code}`}, ${exp.elapsedMs}ms)`, "```text", exp.output.trim(), "```", "");
+    });
+  }
   return lines.join("\n");
 }
