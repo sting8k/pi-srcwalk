@@ -76,6 +76,10 @@ jobs:
         if: steps.npm-version.outputs.exists != 'true'
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Regression tests
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm test
+
       - name: TypeScript check
         if: steps.npm-version.outputs.exists != 'true'
         run: npm run check:ts
