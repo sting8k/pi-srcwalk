@@ -8,7 +8,7 @@ Five agent-facing tools:
 - **`semantic_inspect`** — deep-inspect known symbol(s): context, callers, callees, and references in one shot.
 - **`semantic_show`** — read exact source target(s) via `srcwalk show` with a fixed `-C 12` surrounding-line window.
 - **`semantic_review`** — review staged or working-tree changes with diff evidence and risk hints.
-- **`semantic_grep`** — search raw text or regex with Zoekt-lite candidate pruning and full-scan fallback.
+- **`semantic_grep`** — search raw text or regex with trigram-indexed candidate pruning and full-scan fallback.
 
 No Python runtime. Pure TypeScript. Ships as a [Pi](https://github.com/earendil-works/pi) extension package.
 
@@ -132,7 +132,7 @@ semantic_grep({
 What it does:
 
 - Searches exact text or regex patterns deterministically.
-- Uses a Zoekt-lite pipeline: literal anchor extraction, trigram candidate pruning, then exact line verification.
+- Uses a trigram-indexed pipeline: literal anchor extraction, candidate pruning, then exact line verification.
 - Falls back to full scanning when regex anchors are too weak or too complex.
 - Returns raw file:line matches with optional context lines.
 - Replaces built-in `grep` in the pi-srcwalk injected tool contract.

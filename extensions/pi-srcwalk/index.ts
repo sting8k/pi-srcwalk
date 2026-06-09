@@ -437,21 +437,21 @@ function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: Revie
 }
 
 function disableDefaultGrepIfSupported(pi: ExtensionAPI): void {
-  const controls = pi as unknown as Record<string, unknown>;
-  for (const method of ["disableDefaultTool", "disableTool", "unregisterTool"]) {
-    const fn = controls[method];
-    if (typeof fn !== "function") continue;
-    try {
-      (fn as (name: string) => void).call(controls, "grep");
-    } catch {
-      // Best-effort only: older Pi runtimes may not support disabling built-in tools.
-    }
-  }
+  const controls = pi as unknown as {
+    getActiveTools?: () => unknown[];
+    setActiveTools?: (names: string[]) => void;
+  };
+  const activeTools = controls.getActiveTools?.();
+  if (!Array.isArray(activeTools) || typeof controls.setActiveTools !== "function") return;
+
+  const activeNames = activeTools
+    .map((tool) => typeof tool === "string" ? tool : (tool as { name?: unknown })?.name)
+    .filter((name): name is string => typeof name === "string" && name.length > 0);
+  const nextNames = [...new Set([...activeNames.filter((name) => name !== "grep"), "semantic_grep"])];
+  controls.setActiveTools(nextNames);
 }
 
 export default function piSrcwalkExtension(pi: ExtensionAPI) {
-  disableDefaultGrepIfSupported(pi);
-
   pi.registerTool({
     name: "semantic_query",
     label: "Semantic Query",
@@ -537,7 +537,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "semantic_grep",
     label: "Semantic Grep",
-    description: "Search raw text or regex deterministically with Zoekt-lite trigram candidate pruning and full-scan fallback for weak regex patterns.",
+    description: "Search raw text or regex deterministically with trigram-index candidate pruning and full-scan fallback for weak regex patterns.",
     promptSnippet: "Search exact text/regex with semantic_grep",
     promptGuidelines: [
       "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
@@ -913,6 +913,8 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     },
   });
 
+  disableDefaultGrepIfSupported(pi);
+
   // Cast: ExtensionAPI type lacks on() — provided at runtime by Pi
   const piEvents = pi as unknown as { on(event: string, handler: (event: { systemPrompt: string }) => any): void };
   // === before_agent_start: inject semantic_* contract into system prompt ===
@@ -933,7 +935,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "   fuzzy symbol lookup). Use when target is unclear.",
       "   For exact known symbols, use semantic_inspect.",
       "2. **semantic_grep** — deterministic text/regex search:",
-      "   Zoekt-lite path: literal/regex → trigram candidate prune",
+      "   Trigram-index path: literal/regex → candidate prune",
       "   when anchors are strong → verify exact line matches;",
       "   full-scan fallback when regex is too weak or complex.",
       "3. **semantic_inspect** — known symbol(s) deep inspect:",

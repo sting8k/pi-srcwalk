@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 - `semantic_search` now supports a small QueryIR layer for structured hints such as `file:`, `path:`, `sym:`, `symbol:`, `lang:`, `content:`, `test:`, and `-test`.
-- Added Zoekt-inspired code-aware ranking signals for path, basename, symbol, test, generated/vendor, and language-aware candidate ordering.
+- Added code-aware ranking signals for path, basename, symbol, test, generated/vendor, and language-aware candidate ordering.
 
 ### Changed
 - Hint commands are preserved during broad-query fusion so explicit user constraints stay in the retrieval pool.
