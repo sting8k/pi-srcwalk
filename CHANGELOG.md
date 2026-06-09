@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.0] - 2026-06-09
+
+### Added
+- Added `semantic_query` as the code-structure discovery tool, replacing `semantic_search`.
+- Added `semantic_grep` for deterministic literal and regex search with trigram-index candidate pruning and full-scan fallback.
+- Added grouped-by-file output for `semantic_query` candidates and `semantic_grep` matches.
+
+### Changed
+- The Pi prompt contract now routes raw text and regex search to `semantic_grep` and code-intent discovery to `semantic_query`.
+- Built-in `grep` is disabled via Pi active tools at `session_start` when the runtime supports it.
+- `semantic_query` normal detail now uses compact evidence summaries; deep detail keeps full evidence blocks.
+
 ## [1.1.0] - 2026-06-09
 
 ### Added
