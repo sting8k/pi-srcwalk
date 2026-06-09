@@ -11,6 +11,7 @@ All notable changes to this project are documented here.
 ### Changed
 - Hint commands are preserved during broad-query fusion so explicit user constraints stay in the retrieval pool.
 - Search output now reports parsed QueryIR notes when structured hints are used.
+- Negated hints such as `-file:vendor`, `-sym:Foo`, `-lang:ts`, and `-content:bar` now act as exclusion signals instead of positive filters.
 
 ## [1.0.1] - 2026-06-09
 

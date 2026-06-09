@@ -50,9 +50,13 @@ function dedupeCommands(commands: SrcwalkCommand[]): SrcwalkCommand[] {
 
 export function parseQueryIR(query: string): QueryIR {
   const symbols: string[] = [];
+  const excludeSymbols: string[] = [];
   const fileFilters: string[] = [];
+  const excludeFileFilters: string[] = [];
   const contentTerms: string[] = [];
+  const excludeContentTerms: string[] = [];
   let lang: string | undefined;
+  const excludeLangs: string[] = [];
   let includeTests = false;
   let excludeTests = false;
   const removeSpans: Array<[number, number]> = [];
@@ -69,13 +73,14 @@ export function parseQueryIR(query: string): QueryIR {
     const value = cleanHintValue(match.groups?.value ?? "");
 
     if ((key === "sym" || key === "symbol") && value) {
-      symbols.push(value);
+      (negated ? excludeSymbols : symbols).push(value);
     } else if ((key === "file" || key === "path") && value) {
-      fileFilters.push(value);
+      (negated ? excludeFileFilters : fileFilters).push(value);
     } else if (key === "content" && value) {
-      contentTerms.push(value);
+      (negated ? excludeContentTerms : contentTerms).push(value);
     } else if (key === "lang" && value) {
-      lang = value.toLowerCase();
+      if (negated) excludeLangs.push(value.toLowerCase());
+      else lang = value.toLowerCase();
     } else if (key === "test") {
       const low = value.toLowerCase();
       if (negated || ["0", "false", "no", "off"].includes(low)) excludeTests = true;
@@ -91,7 +96,8 @@ export function parseQueryIR(query: string): QueryIR {
 
   const cleanParts = [base, ...symbols, ...contentTerms];
   if (!base && !symbols.length && !contentTerms.length && fileFilters.length) cleanParts.push(...fileFilters);
-  const cleanQuery = cleanParts.filter(Boolean).join(" ").trim() || query;
+  const hasNegatedSearchHints = Boolean(excludeSymbols.length || excludeFileFilters.length || excludeContentTerms.length || excludeLangs.length);
+  const cleanQuery = cleanParts.filter(Boolean).join(" ").trim() || (hasNegatedSearchHints ? "" : query);
   const terms = uniqueStrings(tokenize([cleanQuery, ...symbols, ...contentTerms].join(" ")));
 
   return {
@@ -99,21 +105,29 @@ export function parseQueryIR(query: string): QueryIR {
     cleanQuery,
     terms,
     symbols: uniqueStrings(symbols),
+    excludeSymbols: uniqueStrings(excludeSymbols),
     fileFilters: uniqueStrings(fileFilters),
+    excludeFileFilters: uniqueStrings(excludeFileFilters),
     contentTerms: uniqueStrings(contentTerms),
+    excludeContentTerms: uniqueStrings(excludeContentTerms),
     lang,
+    excludeLangs: uniqueStrings(excludeLangs),
     includeTests,
     excludeTests,
-    hasHints: Boolean(symbols.length || fileFilters.length || contentTerms.length || lang || includeTests || excludeTests),
+    hasHints: Boolean(symbols.length || excludeSymbols.length || fileFilters.length || excludeFileFilters.length || contentTerms.length || excludeContentTerms.length || lang || excludeLangs.length || includeTests || excludeTests),
   };
 }
 
 export function describeQueryIR(ir: QueryIR): string {
   const parts = [`clean=${JSON.stringify(ir.cleanQuery)}`];
   if (ir.symbols.length) parts.push(`symbols=${JSON.stringify(ir.symbols)}`);
+  if (ir.excludeSymbols.length) parts.push(`exclude_symbols=${JSON.stringify(ir.excludeSymbols)}`);
   if (ir.fileFilters.length) parts.push(`files=${JSON.stringify(ir.fileFilters)}`);
+  if (ir.excludeFileFilters.length) parts.push(`exclude_files=${JSON.stringify(ir.excludeFileFilters)}`);
   if (ir.contentTerms.length) parts.push(`content=${JSON.stringify(ir.contentTerms)}`);
+  if (ir.excludeContentTerms.length) parts.push(`exclude_content=${JSON.stringify(ir.excludeContentTerms)}`);
   if (ir.lang) parts.push(`lang=${ir.lang}`);
+  if (ir.excludeLangs.length) parts.push(`exclude_langs=${JSON.stringify(ir.excludeLangs)}`);
   if (ir.includeTests) parts.push("include_tests=true");
   if (ir.excludeTests) parts.push("exclude_tests=true");
   return parts.join("; ");

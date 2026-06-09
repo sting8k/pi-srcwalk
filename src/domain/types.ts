@@ -15,9 +15,13 @@ export interface QueryIR {
   cleanQuery: string;
   terms: string[];
   symbols: string[];
+  excludeSymbols: string[];
   fileFilters: string[];
+  excludeFileFilters: string[];
   contentTerms: string[];
+  excludeContentTerms: string[];
   lang?: string;
+  excludeLangs: string[];
   includeTests: boolean;
   excludeTests: boolean;
   hasHints: boolean;

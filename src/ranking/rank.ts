@@ -165,6 +165,13 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
         cand.evidence.push("penalty: missed file/path hint (-18)");
       }
 
+      const excludedFileHits = ir.excludeFileFilters.filter((hint) => fileHintMatches(file, hint));
+      if (excludedFileHits.length) {
+        const penalty = 240 + 40 * Math.min(2, excludedFileHits.length - 1);
+        cand.score -= penalty;
+        cand.evidence.push(`penalty: file/path exclusion matched ${excludedFileHits.slice(0, 2).join(",")} (-${penalty.toFixed(0)})`);
+      }
+
       const symbolHitsHint = ir.symbols.filter((hint) => hint.toLowerCase() === symbol || target.includes(hint.toLowerCase()));
       if (symbolHitsHint.length) {
         const boost = 78 + (["definition", "grouped-definition", "exact-context"].includes(cand.source) ? 24 : 0);
@@ -175,6 +182,13 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
         cand.evidence.push("penalty: missed sym hint (-12)");
       }
 
+      const excludedSymbolHits = ir.excludeSymbols.filter((hint) => hint.toLowerCase() === symbol || target.includes(hint.toLowerCase()));
+      if (excludedSymbolHits.length) {
+        const penalty = 240 + (["definition", "grouped-definition", "exact-context"].includes(cand.source) ? 40 : 0);
+        cand.score -= penalty;
+        cand.evidence.push(`penalty: sym exclusion matched ${excludedSymbolHits.slice(0, 2).join(",")} (-${penalty.toFixed(0)})`);
+      }
+
       if (ir.lang) {
         if (langMatches(file, ir.lang)) {
           cand.score += 24;
@@ -183,6 +197,13 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
           cand.score -= 8;
           cand.evidence.push(`penalty: missed lang hint ${ir.lang} (-8)`);
         }
+      }
+
+      const excludedLangHits = ir.excludeLangs.filter((hint) => langMatches(file, hint));
+      if (excludedLangHits.length) {
+        const penalty = 120 * Math.min(2, excludedLangHits.length);
+        cand.score -= penalty;
+        cand.evidence.push(`penalty: lang exclusion matched ${excludedLangHits.slice(0, 2).join(",")} (-${penalty.toFixed(0)})`);
       }
 
       if (ir.includeTests && testTarget) {
@@ -202,6 +223,12 @@ export function scoreCandidates(candidates: Candidate[], plan: QueryPlan): Candi
         const boost = Math.min(30, 10 * contentHits.length);
         cand.score += boost;
         cand.evidence.push(`boost: content hint path/symbol hit ${contentHits.slice(0, 3).join(",")} (+${boost.toFixed(0)})`);
+      }
+      const excludedContentHits = tokenize(ir.excludeContentTerms.join(" ")).filter((t) => target.includes(t) || symbol.includes(t));
+      if (excludedContentHits.length) {
+        const penalty = Math.min(120, 40 * excludedContentHits.length);
+        cand.score -= penalty;
+        cand.evidence.push(`penalty: content exclusion path/symbol hit ${excludedContentHits.slice(0, 3).join(",")} (-${penalty.toFixed(0)})`);
       }
     }
 
