@@ -266,7 +266,9 @@ type ReviewTarget = "staged" | "working-tree";
 
 interface SemanticReviewDetails {
   target: ReviewTarget;
+  repo: string;
   scope: string;
+  effectiveScope: string;
   code: number;
   elapsedMs: number;
   changedFiles?: number;
@@ -642,7 +644,9 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       const truncated = await truncateForTool(packet);
       const details: SemanticReviewDetails = {
         target,
-        scope: reviewCtx.scope,
+        repo: reviewCtx.repo,
+        scope: reviewCtx.requestedScope,
+        effectiveScope: reviewCtx.scope,
         code: result.code,
         elapsedMs: result.elapsedMs,
         ...parseReviewDetails(result.output),
