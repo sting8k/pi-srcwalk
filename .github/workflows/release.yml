@@ -105,11 +105,16 @@ jobs:
           fi
 
           VERSION="${GITHUB_REF_NAME#v}"
-          cat > release-notes.md <<EOF
-          Release $GITHUB_REF_NAME.
+          awk -v tag="$VERSION" '
+            index($0, "## [" tag "]") == 1 { in_section=1; next }
+            in_section && index($0, "## [") == 1 { exit }
+            in_section { print }
+          ' CHANGELOG.md | sed '/./,$!d' > release-notes.md
 
-          npm: https://www.npmjs.com/package/@sting8k/pi-srcwalk/v/$VERSION
-          EOF
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::No CHANGELOG.md section found for $GITHUB_REF_NAME"
+            exit 1
+          fi
 
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
