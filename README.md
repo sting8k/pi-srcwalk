@@ -110,11 +110,11 @@ When `semantic_query` abstains (`abstained: true`), it means no strong match was
 
 ### `semantic_grep`
 
-Use this for exact text or regex matches. Add `scope`, `glob`, `literal`, `regex`, `ignoreCase`, or `context` only when needed.
+Use this for regex search by default. Set `literal: true` for exact strings, and add `scope`, `glob`, `ignoreCase`, or `context` only when needed.
 
 What it does:
 
-- Searches exact text or regex patterns deterministically.
+- Searches regex patterns by default and exact strings when `literal: true` is set.
 - Uses a trigram-indexed pipeline: literal anchor extraction, candidate pruning, then exact line verification.
 - Falls back to full scanning when regex anchors are too weak or too complex.
 - Returns raw file:line matches with optional context lines.
@@ -122,8 +122,8 @@ What it does:
 
 | You ask | It returns |
 |---|---|
-| `foo bar` | literal file:line matches |
 | `execute.*Search` | regex matches with pruned candidates |
+| `literal: true, "foo.bar"` | exact literal file:line matches |
 | `--glob "**/*.ts"` | same search, but limited to matching files |
 | `-i` / `ignoreCase: true` | case-insensitive matches |
 

@@ -541,7 +541,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     promptSnippet: "Search exact text/regex with semantic_grep",
     promptGuidelines: [
       "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
-      "Prefer literal=true for exact strings and regex=true for regex patterns like 'foo.*bar'.",
+      "Default mode is regex; set literal=true for exact strings such as dotted paths, versions, or method chains.",
       "Set scope to one repo-relative dir/file and glob only when a file-pattern filter is useful.",
       "Treat semantic_grep as the pi-srcwalk replacement for the default grep tool; avoid built-in grep unless semantic_grep lacks support and say why.",
     ],
@@ -942,6 +942,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "   Trigram-index path: literal/regex → candidate prune",
       "   when anchors are strong → verify exact line matches;",
       "   full-scan fallback when regex is too weak or complex.",
+      "   Default mode is regex; set literal=true for exact string matches.",
       "3. **semantic_inspect** — known symbol(s) deep inspect:",
       "   context + callers + callees + references in one shot.",
       "   Accepts one symbol or up to 3 symbols. Runs srcwalk context,",
@@ -965,7 +966,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
     const startIdx = event.systemPrompt.indexOf(SENTINEL_START);
     const endIdx = event.systemPrompt.indexOf(SENTINEL_END);
-    if (startIdx !== -1 && endIdx !== -1) {
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
       return {
         systemPrompt:
           event.systemPrompt.slice(0, startIdx) + block +
