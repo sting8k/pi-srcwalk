@@ -101,3 +101,38 @@ test("formatSemanticGrepResult groups shown matches by file", async () => {
   assert.match(formatted, /### src\/a\.ts — 2 shown/);
   assert.match(formatted, /### src\/b\.ts — 1 shown/);
 });
+
+test("semantic_grep reports cache and search metrics on repeated calls", async () => {
+  const repo = await fixtureRepo({
+    "src/a.ts": "ABC-212 first\nABC-212 second\n",
+    "src/b.ts": "noise\n",
+  });
+
+  const first = await executeSemanticGrep({ repo, scope: ".", pattern: "ABC-212", literal: true });
+  const second = await executeSemanticGrep({ repo, scope: ".", pattern: "ABC-212", literal: true });
+
+  assert.equal(first.stats.cacheHit, false);
+  assert.equal(second.stats.cacheHit, true);
+  assert.equal(second.stats.indexedFiles, 2);
+  assert.equal(second.stats.candidateFiles, 1);
+  assert.equal(second.stats.searchedFiles, 1);
+  assert.equal(second.stats.matchedFiles, 1);
+  assert.equal(second.stats.totalMatches, 2);
+  assert.equal(second.stats.truncated, false);
+});
+
+test("semantic_grep reports truncation metrics when maxResults is lower than total matches", async () => {
+  const repo = await fixtureRepo({
+    "src/a.ts": "ABC-212 one\nABC-212 two\nABC-212 three\n",
+  });
+
+  const result = await executeSemanticGrep({ repo, scope: ".", pattern: "ABC-212", literal: true, maxResults: 2 });
+
+  assert.equal(result.stats.indexedFiles, 1);
+  assert.equal(result.stats.candidateFiles, 1);
+  assert.equal(result.stats.searchedFiles, 1);
+  assert.equal(result.stats.matchedFiles, 1);
+  assert.equal(result.stats.totalMatches, 3);
+  assert.equal(result.stats.truncated, true);
+  assert.equal(result.matches.length, 2);
+});

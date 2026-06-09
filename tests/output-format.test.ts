@@ -105,3 +105,39 @@ test("formatResult groups normal evidence expansions by file and trace label", (
   assert.match(formatted, /### callers — 1 expansion/);
   assert.match(formatted, /### callees — 1 expansion/);
 });
+
+test("formatResult includes cache metrics section when cache stats exist", () => {
+  const result: SearchResult = {
+    plan: basePlan,
+    commandResults: [],
+    candidates: [],
+    expansions: [],
+    notes: [],
+    confidence: {
+      level: "low",
+      abstained: true,
+      reason: "test",
+      topScore: 0,
+      topGap: 0,
+      topFileCluster: 0,
+      pathKeywordCoverage: 0,
+    },
+    cache: {
+      cacheKind: "memory",
+      cacheLocation: "memory:abc123",
+      cacheHit: true,
+      chunks: 12,
+      files: 3,
+      fingerprint: "deadbeef",
+      buildMs: 8,
+      queryMs: 2,
+      sizeBytes: 1024,
+    },
+  };
+
+  const formatted = formatResult(result);
+
+  assert.match(formatted, /## Cache/);
+  assert.match(formatted, /cache_hit: true/);
+  assert.match(formatted, /estimated_mem_mb:/);
+});
