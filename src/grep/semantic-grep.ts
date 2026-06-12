@@ -2,8 +2,13 @@ import { readFile, stat } from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { iterFiles } from "../index/files.js";
-import { validateScope } from "../router/intent.js";
+import {
+  canonicalScopeDisplays,
+  collectCandidateFiles,
+  normalizeScopesInput,
+  resolveAndPruneScopes,
+  type PrunedScopes,
+} from "./semantic-grep-scopes.js";
 import { runAbortableSingleFlight, runWithRepoBuildQueue, type AbortableFlight } from "../cache/build-coordinator.js";
 
 export type SemanticGrepBackend = "trigram-index" | "full-scan" | "invalid-regex";
@@ -11,7 +16,7 @@ export type SemanticGrepBackend = "trigram-index" | "full-scan" | "invalid-regex
 export interface ExecuteSemanticGrepOptions {
   pattern: string;
   repo?: string;
-  scope?: string;
+  scopes?: string[];
   glob?: string;
   literal?: boolean;
   regex?: boolean;
@@ -31,7 +36,7 @@ export interface SemanticGrepMatch {
 
 export interface SemanticGrepResult {
   repo: string;
-  scope: string;
+  scopes: string[];
   pattern: string;
   glob?: string;
   literal: boolean;
@@ -58,13 +63,15 @@ export interface SemanticGrepResult {
 
 interface IndexedFile {
   rel: string;
+  displayPath: string;
   text: string;
   lines: string[];
 }
 
 interface GrepIndex {
   repo: string;
-  scope: string;
+  scopeKeys: string[];
+  indexNotes: string[];
   glob?: string;
   fingerprint: string;
   files: IndexedFile[];
@@ -86,8 +93,15 @@ function normalizeRel(repo: string, file: string): string {
   return path.relative(repo, file).split(path.sep).join("/");
 }
 
-function cacheKey(repo: string, scope: string, glob?: string): string {
-  return crypto.createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${glob ?? ""}\nsemantic-grep-v1`).digest("hex").slice(0, 20);
+function displayPathForMatch(repo: string, absFile: string): string {
+  const rel = path.relative(repo, absFile);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return absFile;
+  return rel.split(path.sep).join("/");
+}
+
+function cacheKey(repo: string, scopeKeys: string[], glob?: string): string {
+  const payload = `${path.resolve(repo)}\n${scopeKeys.join("\n")}\n${glob ?? ""}\nsemantic-grep-v2`;
+  return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 20);
 }
 
 async function fingerprintFiles(repo: string, files: string[], signal?: AbortSignal): Promise<string> {
@@ -159,16 +173,6 @@ function addPostings(postings: Map<string, Set<number>>, text: string, fileId: n
   }
 }
 
-async function candidateFiles(repo: string, scope: string, glob?: string, signal?: AbortSignal): Promise<string[]> {
-  const files = await iterFiles(repo, scope, signal);
-  const out: string[] = [];
-  for (const file of files) {
-    if (signal?.aborted) throw new Error("semantic_grep aborted");
-    if (matchesGlob(normalizeRel(repo, file), glob)) out.push(file);
-  }
-  return out;
-}
-
 function touchCache(key: string, index: GrepIndex): void {
   grepCache.delete(key);
   grepCache.set(key, index);
@@ -179,18 +183,24 @@ function touchCache(key: string, index: GrepIndex): void {
   }
 }
 
-async function buildOrLoadGrepIndex(repo: string, scope: string, glob: string | undefined, signal?: AbortSignal): Promise<GrepBuildResult> {
+async function buildOrLoadGrepIndex(repo: string, pruned: PrunedScopes, glob: string | undefined, signal?: AbortSignal): Promise<GrepBuildResult> {
   if (signal?.aborted) throw new Error("semantic_grep aborted");
-  const key = cacheKey(repo, scope, glob);
+  const key = cacheKey(repo, pruned.canonicalKeys, glob);
   return runAbortableSingleFlight(grepBuilds, key, signal, "semantic_grep aborted", (buildSignal) =>
-    runWithRepoBuildQueue(repo, () => buildOrLoadGrepIndexUncoordinated(repo, scope, glob, key, buildSignal)),
+    runWithRepoBuildQueue(repo, () => buildOrLoadGrepIndexUncoordinated(repo, pruned, glob, key, buildSignal)),
   );
 }
 
-async function buildOrLoadGrepIndexUncoordinated(repo: string, scope: string, glob: string | undefined, key: string, signal: AbortSignal): Promise<GrepBuildResult> {
+async function buildOrLoadGrepIndexUncoordinated(
+  repo: string,
+  pruned: PrunedScopes,
+  glob: string | undefined,
+  key: string,
+  signal: AbortSignal,
+): Promise<GrepBuildResult> {
   const started = performance.now();
   if (signal.aborted) throw new Error("semantic_grep aborted");
-  const files = await candidateFiles(repo, scope, glob, signal);
+  const { files, notes: indexNotes } = await collectCandidateFiles(repo, pruned, glob, matchesGlob, normalizeRel, signal);
   if (signal.aborted) throw new Error("semantic_grep aborted");
   const fingerprint = await fingerprintFiles(repo, files, signal);
   if (signal.aborted) throw new Error("semantic_grep aborted");
@@ -208,16 +218,19 @@ async function buildOrLoadGrepIndexUncoordinated(repo: string, scope: string, gl
     const text = await readFile(file, "utf8").catch(() => undefined);
     if (text === undefined) continue;
     const rel = normalizeRel(repo, file);
+    const displayPath = displayPathForMatch(repo, file);
     const id = indexedFiles.length;
-    indexedFiles.push({ rel, text, lines: text.split(/\r?\n/) });
+    indexedFiles.push({ rel, displayPath, text, lines: text.split(/\r?\n/) });
     sizeBytes += Buffer.byteLength(text, "utf8") + rel.length;
     addPostings(postings, text, id);
     addPostings(postings, rel, id);
+    addPostings(postings, displayPath, id);
   }
 
   const index: GrepIndex = {
     repo,
-    scope,
+    scopeKeys: pruned.canonicalKeys,
+    indexNotes,
     glob,
     fingerprint,
     files: indexedFiles,
@@ -338,15 +351,20 @@ function contextAfter(lines: string[], idx: number, count: number): Array<{ line
 export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): Promise<SemanticGrepResult> {
   const queryStarted = performance.now();
   const repo = path.resolve(options.repo ?? process.cwd());
-  const scope = validateScope(options.scope ?? ".");
+  const requestedScopes = normalizeScopesInput(options.scopes);
+  const pruned = await resolveAndPruneScopes(repo, requestedScopes);
+  const scopeDisplays = canonicalScopeDisplays(pruned);
+  const notes: string[] = [...pruned.notes];
   const pattern = options.pattern;
   const literal = options.regex ? false : Boolean(options.literal);
   const ignoreCase = Boolean(options.ignoreCase);
   const context = Math.max(0, Math.min(Math.floor(options.context ?? 0), MAX_CONTEXT_LINES));
   const maxResults = Math.max(1, Math.min(Math.floor(options.maxResults ?? DEFAULT_MAX_RESULTS), MAX_MAX_RESULTS));
-  const notes: string[] = [];
 
-  const { index, cacheHit, buildMs } = await buildOrLoadGrepIndex(repo, scope, options.glob, options.signal);
+  const { index, cacheHit, buildMs } = await buildOrLoadGrepIndex(repo, pruned, options.glob, options.signal);
+  for (const note of index.indexNotes) {
+    if (!notes.includes(note)) notes.push(note);
+  }
   if (options.signal?.aborted) throw new Error("semantic_grep aborted");
   const anchorPlan = anchorsFor(pattern, literal);
   const backend: SemanticGrepBackend = anchorPlan.canPrune ? "trigram-index" : "full-scan";
@@ -359,7 +377,7 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
     } catch (error) {
       return {
         repo,
-        scope,
+        scopes: scopeDisplays,
         pattern,
         glob: options.glob,
         literal,
@@ -406,7 +424,7 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
       fileMatched = true;
       if (matches.length < maxResults) {
         matches.push({
-          path: file.rel,
+          path: file.displayPath,
           line: i + 1,
           text: line,
           before: contextBefore(file.lines, i, context),
@@ -416,12 +434,12 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
         truncated = true;
       }
     }
-    if (fileMatched) matchedFiles.add(file.rel);
+    if (fileMatched) matchedFiles.add(file.displayPath);
   }
 
   return {
     repo,
-    scope,
+    scopes: scopeDisplays,
     pattern,
     glob: options.glob,
     literal,
@@ -474,7 +492,7 @@ export function formatSemanticGrepResult(result: SemanticGrepResult): string {
   const lines: string[] = [
     `# semantic-grep ts: ${result.pattern}`,
     `repo: ${result.repo}`,
-    `scope: ${result.scope}`,
+    `scopes: ${JSON.stringify(result.scopes)}`,
   ];
   if (result.glob) lines.push(`glob: ${result.glob}`);
   lines.push(
