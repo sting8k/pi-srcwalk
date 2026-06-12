@@ -110,10 +110,11 @@ When `semantic_query` abstains (`abstained: true`), it means no strong match was
 
 ### `semantic_grep`
 
-Use this for regex search by default. Set `literal: true` for exact strings, and add `scope`, `glob`, `ignoreCase`, or `context` only when needed.
+Use this for regex search by default. Set `literal: true` for exact strings, and add `scopes`, `glob`, `ignoreCase`, or `context` only when needed.
 
 What it does:
 
+- `scopes` accepts one or more dir/file paths (relative, `../`, or absolute). Overlapping scopes are canonicalized before indexing.
 - Searches regex patterns by default and exact strings when `literal: true` is set.
 - Uses a trigram-indexed pipeline: literal anchor extraction, candidate pruning, then exact line verification.
 - Falls back to full scanning when regex anchors are too weak or too complex.
@@ -231,7 +232,7 @@ Agent (Pi)
   │    -> BM25/PRF + srcwalk evidence
   │    -> ranked candidates + confidence
   │
-  ├─ semantic_grep({ pattern, scope?, glob?, literal?, regex? })
+  ├─ semantic_grep({ pattern, scopes?, glob?, literal?, regex? })
   │    deterministic text/regex search
   │    -> literal anchors / trigram prune
   │    -> verify exact line matches

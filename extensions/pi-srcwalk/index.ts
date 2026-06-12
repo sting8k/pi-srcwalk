@@ -20,8 +20,7 @@ const QueryParams = Type.Object({
 const GrepParams = Type.Object({
   pattern: Type.Optional(Type.String({ description: "Text or regex pattern to search. Use query as an alias if you prefer. Use semantic_query for code-intent discovery and semantic_grep for exact match search." })),
   query: Type.Optional(Type.String({ description: "Alias of pattern." })),
-  scope: Type.Optional(Type.String({ description: "Repo-relative dir/file scope to search. Omit or use '.' for repo root. Examples: 'src', 'src/index/cache.ts'." })),
-  path: Type.Optional(Type.String({ description: "Alias of scope." })),
+  scopes: Type.Optional(Type.Array(Type.String(), { description: "Dir or file paths to search. Relative paths resolve from cwd; absolute and parent-relative paths (../) are allowed. Defaults to [\".\"] when omitted." })),
   glob: Type.Optional(Type.String({ description: "Optional simple glob to narrow files, e.g. '**/*.ts' or 'src/**/*.md'." })),
   literal: Type.Optional(Type.Boolean({ description: "Treat the pattern as a literal string instead of regex." })),
   regex: Type.Optional(Type.Boolean({ description: "Treat the pattern as regex; overrides literal when true." })),
@@ -79,7 +78,7 @@ interface SemanticQueryDetails {
 
 interface SemanticGrepDetails {
   pattern: string;
-  scope: string;
+  scopes: string[];
   glob?: string;
   literal: boolean;
   ignoreCase: boolean;
@@ -542,16 +541,20 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
       "Default mode is regex; set literal=true for exact strings such as dotted paths, versions, or method chains.",
-      "Set scope to one repo-relative dir/file and glob only when a file-pattern filter is useful.",
+      "Set scopes to one or more dir/file paths when needed; glob only when a file-pattern filter is useful.",
       "Treat semantic_grep as the pi-srcwalk replacement for the default grep tool; avoid built-in grep unless semantic_grep lacks support and say why.",
     ],
     parameters: GrepParams,
     prepareArguments(args: unknown) {
       if (!args || typeof args !== "object") return args;
       const input = args as Record<string, unknown>;
+      const rawScopes = input.scopes;
+      const scopes = Array.isArray(rawScopes)
+        ? rawScopes.filter((s): s is string => typeof s === "string")
+        : undefined;
       return {
         pattern: input.pattern ?? input.query,
-        scope: input.scope ?? input.path,
+        scopes,
         glob: input.glob,
         literal: input.literal,
         regex: input.regex,
@@ -560,18 +563,17 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         maxResults: input.max_results ?? input.limit,
       };
     },
-    async execute(_toolCallId: string, params: { pattern?: string; query?: string; scope?: string; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+    async execute(_toolCallId: string, params: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       const pattern = params.pattern ?? params.query ?? "";
       if (!pattern.trim()) {
         return { content: [{ type: "text", text: "semantic_grep: provide pattern or query." }] };
       }
-      const scope = params.scope?.trim() || ".";
       const mode = params.regex ? "regex" : params.literal ? "literal" : "regex";
       onUpdate?.({ content: [{ type: "text", text: `Running semantic_grep (${mode})...` }] });
       const result = await executeSemanticGrep({
         pattern,
         repo: ctx.cwd,
-        scope,
+        scopes: params.scopes,
         glob: params.glob,
         literal: params.literal,
         regex: params.regex,
@@ -584,7 +586,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       const truncated = await truncateForTool(packet);
       const details: SemanticGrepDetails = {
         pattern: result.pattern,
-        scope: result.scope,
+        scopes: result.scopes,
         glob: result.glob,
         literal: result.literal,
         ignoreCase: result.ignoreCase,
@@ -597,11 +599,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
       return { content: [{ type: "text", text: truncated.text }], details };
     },
-    renderCall(args: { pattern?: string; query?: string; scope?: string; glob?: string; literal?: boolean; regex?: boolean }, theme: ThemeLike) {
+    renderCall(args: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean }, theme: ThemeLike) {
       const label = args.pattern ?? args.query ?? "";
       const mode = args.regex ? "regex" : args.literal ? "literal" : "regex";
       let text = theme.fg("toolTitle", theme.bold("semantic_grep ")) + theme.fg("accent", `/${label}/`) + theme.fg("dim", ` ${mode}`);
-      if (args.scope) text += theme.fg("muted", ` in ${args.scope}`);
+      if (args.scopes?.length) text += theme.fg("muted", ` in ${args.scopes.join(", ")}`);
       if (args.glob) text += theme.fg("muted", ` glob ${args.glob}`);
       return new Text(text, 0, 0);
     },
