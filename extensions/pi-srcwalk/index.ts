@@ -20,11 +20,7 @@ const QueryParams = Type.Object({
 const GrepParams = Type.Object({
   pattern: Type.Optional(Type.String({ description: "Text or regex pattern to search. Use query as an alias if you prefer. Use semantic_query for code-intent discovery and semantic_grep for exact match search." })),
   query: Type.Optional(Type.String({ description: "Alias of pattern." })),
-  scopes: Type.Optional({
-    type: "array",
-    items: { type: "string" },
-    description: "Dir or file paths to search. Relative paths resolve from cwd; absolute and parent-relative paths (../) are allowed. Defaults to [\".\"] when omitted.",
-  } as Record<string, unknown>),
+  scopes: Type.Optional(Type.Array(Type.String(), { description: "Dir or file paths to search. Relative paths resolve from cwd; absolute and parent-relative paths (../) are allowed. Defaults to [\".\"] when omitted." })),
   glob: Type.Optional(Type.String({ description: "Optional simple glob to narrow files, e.g. '**/*.ts' or 'src/**/*.md'." })),
   literal: Type.Optional(Type.Boolean({ description: "Treat the pattern as a literal string instead of regex." })),
   regex: Type.Optional(Type.Boolean({ description: "Treat the pattern as regex; overrides literal when true." })),
