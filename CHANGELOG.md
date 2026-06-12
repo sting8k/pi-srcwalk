@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.2] - 2026-06-12
+
+### Added
+- Added multi-scope `semantic_grep` support through `scopes`, including relative, parent-relative, and absolute search roots.
+- Added canonical scope pruning, realpath-based file deduplication, and traversal/index resource caps for multi-scope grep.
+
+### Fixed
+- Updated the Pi tool schema to use the TypeBox array schema for `semantic_grep.scopes`.
+
 ## [1.2.1] - 2026-06-09
 
 ### Fixed
