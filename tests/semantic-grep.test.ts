@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { executeSemanticGrep, formatSemanticGrepResult } from "../src/grep/semantic-grep.js";
+import {
+  executeSemanticGrep,
+  formatSemanticGrepResult,
+  selectSemanticGrepEnrichmentTargets,
+  type SemanticGrepMatch,
+} from "../src/grep/semantic-grep.js";
 
 async function fixtureRepo(files: Record<string, string>): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "pi-srcwalk-grep-test-"));
@@ -100,6 +105,49 @@ test("formatSemanticGrepResult groups shown matches by file", async () => {
   assert.match(formatted, /## Matches by file/);
   assert.match(formatted, /### src\/a\.ts — 2 shown/);
   assert.match(formatted, /### src\/b\.ts — 1 shown/);
+});
+
+test("selectSemanticGrepEnrichmentTargets keeps the top ranked grep matches", () => {
+  const matches: SemanticGrepMatch[] = [
+    { path: "src/a.ts", line: 1, text: "first", before: [], after: [] },
+    { path: "src/a.ts", line: 2, text: "second", before: [], after: [] },
+    { path: "src/b.ts", line: 1, text: "third", before: [], after: [] },
+    { path: "src/c.ts", line: 1, text: "fourth", before: [], after: [] },
+  ];
+
+  const selected = selectSemanticGrepEnrichmentTargets({ matches }, 3);
+
+  assert.deepEqual(selected.targets.map((target) => target.target), ["src/a.ts:1", "src/a.ts:2", "src/b.ts:1"]);
+  assert.match(selected.skipped.map((skip) => skip.reason).join("\n"), /limit reached \(3\)/);
+});
+
+test("formatSemanticGrepResult appends inspect enrichment when provided", async () => {
+  const repo = await fixtureRepo({
+    "src/a.ts": "needle\n",
+  });
+
+  const result = await executeSemanticGrep({ repo, scopes: ["."], pattern: "needle", literal: true });
+  const formatted = formatSemanticGrepResult(result, {
+    mode: "inspect",
+    relation: "all",
+    inspectId: "rabc-u1",
+    status: "complete",
+    requested: 1,
+    inspected: 1,
+    skipped: [],
+    elapsedMs: 12,
+    items: [{
+      target: "src/a.ts:1",
+      symbol: "runNeedle",
+      output: "# semantic-inspect: runNeedle",
+      targets: ["src/a.ts:1"],
+    }],
+  });
+
+  assert.match(formatted, /## Matches by file/);
+  assert.match(formatted, /## Inspect enrichment/);
+  assert.match(formatted, /inspect_id: rabc-u1/);
+  assert.match(formatted, /### runNeedle — src\/a\.ts:1/);
 });
 
 test("semantic_grep reports cache and search metrics on repeated calls", async () => {
