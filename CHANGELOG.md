@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.4] - 2026-06-26
+
+### Changed
+- Lazy-load `pi-srcwalk` tool implementations from each tool execution path so Pi startup and help rendering no longer eagerly load the search, grep, formatter, and srcwalk runner implementation graph.
+
 ## [1.2.3] - 2026-06-13
 
 ### Added
