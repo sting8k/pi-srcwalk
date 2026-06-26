@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.3] - 2026-06-13
+
+### Added
+- `semantic_grep` now enriches the top 3 ranked matches with inspect packets by default, including context, flow map, callers, callees, and references.
+- Added `enrich: false` opt-out to suppress enrichment and return raw grep output.
+- Enrichment deduplicates inspected symbols and reports skipped targets with reasons.
+- File-scoped grep enrichment uses parent scope for context/inspect resolution.
+
+### Fixed
+- Skipped enrichment entries are now surfaced instead of silently discarded when all targets are filtered out.
+
 ## [1.2.2] - 2026-06-12
 
 ### Added
