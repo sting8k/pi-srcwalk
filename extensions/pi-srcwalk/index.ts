@@ -332,7 +332,7 @@ async function buildSemanticGrepInspectEnrichment(
   const started = performance.now();
   const relation: SemanticGrepEnrichmentRelation = "all";
   const { targets, skipped } = selectSemanticGrepEnrichmentTargets(result, SEMANTIC_GREP_ENRICH_LIMIT);
-  if (!targets.length) return undefined;
+  if (!targets.length && !skipped.length) return undefined;
 
   const requestedScope = result.scopes.length === 1 ? result.scopes[0]! : ".";
   const scope = traceScopeForInspect(repo, requestedScope, relation);

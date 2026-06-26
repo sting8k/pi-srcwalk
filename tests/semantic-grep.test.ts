@@ -121,6 +121,44 @@ test("selectSemanticGrepEnrichmentTargets keeps the top ranked grep matches", ()
   assert.match(selected.skipped.map((skip) => skip.reason).join("\n"), /limit reached \(3\)/);
 });
 
+test("selectSemanticGrepEnrichmentTargets skips non-repo-relative paths", () => {
+  const matches: SemanticGrepMatch[] = [
+    { path: "/abs/a.ts", line: 1, text: "first", before: [], after: [] },
+    { path: "../parent.ts", line: 3, text: "second", before: [], after: [] },
+  ];
+
+  const selected = selectSemanticGrepEnrichmentTargets({ matches }, 3);
+
+  assert.equal(selected.targets.length, 0);
+  assert.equal(selected.skipped.length, 2);
+  assert.match(selected.skipped.map((s) => s.reason).join("\n"), /outside the repo/);
+});
+
+test("formatSemanticGrepResult renders skipped entries even with no inspected items", () => {
+  const formatted = formatSemanticGrepResult(
+    { repo: "test", scopes: ["src"], pattern: "foo", glob: undefined, literal: true, ignoreCase: false, backend: "trigram-index", anchors: [], stats: { cacheHit: false, cacheLocation: "memory:x", indexedFiles: 1, candidateFiles: 1, searchedFiles: 1, matchedFiles: 1, totalMatches: 1, truncated: false, buildMs: 1, queryMs: 1, sizeBytes: 100 }, notes: [], matches: [{ path: "src/a.ts", line: 1, text: "foo", before: [], after: [] }] },
+    {
+      mode: "inspect",
+      relation: "all",
+      inspectId: "rskip-u1",
+      status: "partial",
+      requested: 2,
+      inspected: 0,
+      skipped: [
+        { target: "/abs/a.ts:1", reason: "match path is outside the repo" },
+        { target: "../parent.ts:3", reason: "match path is outside the repo" },
+      ],
+      elapsedMs: 5,
+      items: [],
+    },
+  );
+
+  assert.match(formatted, /## Inspect enrichment/);
+  assert.match(formatted, /status: partial/);
+  assert.match(formatted, /outside the repo/);
+  assert.doesNotMatch(formatted, /### \w+ —/);
+});
+
 test("formatSemanticGrepResult appends inspect enrichment when provided", async () => {
   const repo = await fixtureRepo({
     "src/a.ts": "needle\n",
