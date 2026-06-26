@@ -1,20 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { executeSearch } from "../../src/engine.js";
-import {
-  executeSemanticGrep,
-  formatSemanticGrepResult,
-  selectSemanticGrepEnrichmentTargets,
-  type SemanticGrepEnrichmentRelation,
-  type SemanticGrepInspectEnrichment,
-} from "../../src/grep/semantic-grep.js";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
-import { formatResult } from "../../src/output/format.js";
-import { truncateForTool } from "../../src/output/truncate.js";
-import { commandDisplay } from "../../src/router/intent.js";
-import { parseSymbolFromContext } from "../../src/srcwalk/parse.js";
-import { runCommand } from "../../src/srcwalk/runner.js";
+import type {
+  SemanticGrepEnrichmentRelation,
+  SemanticGrepInspectEnrichment,
+  SemanticGrepResult,
+} from "../../src/grep/semantic-grep.js";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -255,6 +247,7 @@ async function inspectOneSymbol(
   signal: AbortSignal | undefined,
   limit: number,
 ): Promise<{ results: Array<{ code: number; output: string; command: SrcwalkCommand }>; targets: string[] }> {
+  const { runCommand } = await import("../../src/srcwalk/runner.js");
   const commands = inspectCommands(symbol, relation, scope, traceScope, limit);
   const results: Array<{ code: number; output: string; command: SrcwalkCommand }> = [];
 
@@ -323,15 +316,20 @@ function semanticGrepEnrichmentEnabled(enrich: unknown): boolean {
 }
 
 async function buildSemanticGrepInspectEnrichment(
-  result: Awaited<ReturnType<typeof executeSemanticGrep>>,
+  result: SemanticGrepResult,
   repo: string,
   signal: AbortSignal | undefined,
 ): Promise<SemanticGrepInspectEnrichment | undefined> {
   if (result.error || !result.matches.length) return undefined;
 
+  const [semanticGrep, parser, runner] = await Promise.all([
+    import("../../src/grep/semantic-grep.js"),
+    import("../../src/srcwalk/parse.js"),
+    import("../../src/srcwalk/runner.js"),
+  ]);
   const started = performance.now();
   const relation: SemanticGrepEnrichmentRelation = "all";
-  const { targets, skipped } = selectSemanticGrepEnrichmentTargets(result, SEMANTIC_GREP_ENRICH_LIMIT);
+  const { targets, skipped } = semanticGrep.selectSemanticGrepEnrichmentTargets(result, SEMANTIC_GREP_ENRICH_LIMIT);
   if (!targets.length && !skipped.length) return undefined;
 
   const requestedScope = result.scopes.length === 1 ? result.scopes[0]! : ".";
@@ -349,13 +347,13 @@ async function buildSemanticGrepInspectEnrichment(
       purpose: "infer grep match symbol before inspect enrichment",
       parseAs: "context",
     };
-    const contextResult = await runCommand(repo, contextCmd, signal);
+    const contextResult = await runner.runCommand(repo, contextCmd, signal);
     if (contextResult.code !== 0) {
       skipped.push({ target: target.target, reason: `context failed code=${contextResult.code}` });
       continue;
     }
 
-    const symbol = parseSymbolFromContext(contextResult.output);
+    const symbol = parser.parseSymbolFromContext(contextResult.output);
     if (!symbol) {
       skipped.push({ target: target.target, reason: "no enclosing symbol inferred from context" });
       continue;
@@ -515,7 +513,7 @@ function parseReviewDetails(output: string): Pick<SemanticReviewDetails, "change
   };
 }
 
-function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: ReviewExecutionContext, result: { code: number; elapsedMs: number; output: string; command: SrcwalkCommand }): string {
+function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: ReviewExecutionContext, result: { code: number; elapsedMs: number; output: string; command: SrcwalkCommand }, commandText: string): string {
   const status = result.code === 0 ? "ok" : `code=${result.code}`;
   const requestedScopeLine = reviewCtx.requestedScope !== reviewCtx.scope ? [`requested_scope: ${reviewCtx.requestedScope}`] : [];
   return [
@@ -525,7 +523,7 @@ function formatReviewPacket(repo: string, target: ReviewTarget, reviewCtx: Revie
     `scope: ${reviewCtx.scope}`,
     "",
     "## Command",
-    `- [${status}, ${result.elapsedMs}ms] ${commandDisplay(result.command)}`,
+    `- [${status}, ${result.elapsedMs}ms] ${commandText}`,
     "",
     "## Review evidence",
     "```text",
@@ -570,6 +568,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     },
     async execute(_toolCallId: string, params: { query: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       onUpdate?.({ content: [{ type: "text", text: "Running semantic_query..." }] });
+      const [{ executeSearch }, { formatResult }, { truncateForTool }] = await Promise.all([
+        import("../../src/engine.js"),
+        import("../../src/output/format.js"),
+        import("../../src/output/truncate.js"),
+      ]);
       const result = await executeSearch({
         query: params.query,
         repo: ctx.cwd,
@@ -666,6 +669,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number; enrich?: boolean | string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const [{ executeSemanticGrep, formatSemanticGrepResult }, { truncateForTool }] = await Promise.all([
+        import("../../src/grep/semantic-grep.js"),
+        import("../../src/output/truncate.js"),
+      ]);
       const pattern = params.pattern ?? params.query ?? "";
       if (!pattern.trim()) {
         return { content: [{ type: "text", text: "semantic_grep: provide pattern or query." }] };
@@ -770,6 +777,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { symbol?: string; symbols?: string[]; relation?: string; scope?: string; limit?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const { truncateForTool } = await import("../../src/output/truncate.js");
       const rawSymbols = params.symbols ?? (params.symbol ? [params.symbol] : []);
       const relation = params.relation ?? "all";
       const scope = params.scope?.trim() || ".";
@@ -896,6 +904,11 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       return { target: input.target, scope: input.scope };
     },
     async execute(_toolCallId: string, params: { target?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const [{ runCommand }, { commandDisplay }, { truncateForTool }] = await Promise.all([
+        import("../../src/srcwalk/runner.js"),
+        import("../../src/router/intent.js"),
+        import("../../src/output/truncate.js"),
+      ]);
       const target = normalizeReviewTarget(params.target);
       const scope = params.scope?.trim() || ".";
       const reviewCtx = resolveReviewContext(ctx.cwd, scope);
@@ -904,7 +917,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       onUpdate?.({ content: [{ type: "text", text: `Running semantic_review (${target}) in ${reviewLocation}...` }] });
       const command = reviewCommand(target, reviewCtx.scope);
       const result = await runCommand(reviewCtx.repo, command, signal);
-      const packet = formatReviewPacket(reviewCtx.repo, target, reviewCtx, result);
+      const packet = formatReviewPacket(reviewCtx.repo, target, reviewCtx, result, commandDisplay(result.command));
       const truncated = await truncateForTool(packet);
       const details: SemanticReviewDetails = {
         target,
@@ -960,6 +973,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const [{ runCommand }, { truncateForTool }] = await Promise.all([
+        import("../../src/srcwalk/runner.js"),
+        import("../../src/output/truncate.js"),
+      ]);
       // Resolve target from params
       let target: string;
       let candidateInfo: string;
