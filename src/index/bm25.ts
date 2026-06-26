@@ -8,6 +8,60 @@ const FIRST_PASS_K = 12;
 const PRF_DOCS = 5;
 const PRF_TERMS = 5;
 
+interface HeapEntry<T> {
+  item: T;
+  score: number;
+  order: number;
+}
+
+function worseThan<T>(a: HeapEntry<T>, b: HeapEntry<T>): boolean {
+  return a.score < b.score || (a.score === b.score && a.order > b.order);
+}
+
+function betterThan<T>(a: HeapEntry<T>, b: HeapEntry<T>): boolean {
+  return a.score > b.score || (a.score === b.score && a.order < b.order);
+}
+
+function siftUp<T>(heap: Array<HeapEntry<T>>, index: number): void {
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (!worseThan(heap[index]!, heap[parent]!)) break;
+    [heap[index], heap[parent]] = [heap[parent]!, heap[index]!];
+    index = parent;
+  }
+}
+
+function siftDown<T>(heap: Array<HeapEntry<T>>, index: number): void {
+  for (;;) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let worst = index;
+    if (left < heap.length && worseThan(heap[left]!, heap[worst]!)) worst = left;
+    if (right < heap.length && worseThan(heap[right]!, heap[worst]!)) worst = right;
+    if (worst === index) return;
+    [heap[index], heap[worst]] = [heap[worst]!, heap[index]!];
+    index = worst;
+  }
+}
+
+function topKByScore<T>(items: Iterable<T>, topK: number, scoreOf: (item: T) => number): T[] {
+  if (topK <= 0) return [];
+  const heap: Array<HeapEntry<T>> = [];
+  let order = 0;
+  for (const item of items) {
+    const entry = { item, score: scoreOf(item), order };
+    order += 1;
+    if (heap.length < topK) {
+      heap.push(entry);
+      siftUp(heap, heap.length - 1);
+    } else if (betterThan(entry, heap[0]!)) {
+      heap[0] = entry;
+      siftDown(heap, 0);
+    }
+  }
+  return heap.sort((a, b) => b.score - a.score || a.order - b.order).map((entry) => entry.item);
+}
+
 function idf(index: LexicalIndex, termId: number): number {
   const n = index.chunkCount;
   const df = index.docFreq[termId] ?? 0;
@@ -41,7 +95,7 @@ function score(index: LexicalIndex, queryTokens: string[], topK: number): Array<
       scores.set(idx, (scores.get(idx) ?? 0) + qWeight * termIdf * (freq * (k1 + 1)) / denom);
     }
   }
-  return [...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, topK);
+  return topKByScore(scores.entries(), topK, ([, value]) => value);
 }
 
 function feedbackTerms(index: LexicalIndex, top: Array<[number, number]>, queryTokens: string[]): string[] {
@@ -58,7 +112,7 @@ function feedbackTerms(index: LexicalIndex, top: Array<[number, number]>, queryT
       weights.set(termId, (weights.get(termId) ?? 0) + tf * idf(index, termId));
     }
   }
-  return [...weights.entries()].sort((a, b) => b[1] - a[1]).slice(0, PRF_TERMS).map(([termId]) => index.vocab[termId] ?? "").filter(Boolean);
+  return topKByScore(weights.entries(), PRF_TERMS, ([, value]) => value).map(([termId]) => index.vocab[termId] ?? "").filter(Boolean);
 }
 
 export function shouldRunBm25(plan: QueryPlan): boolean {

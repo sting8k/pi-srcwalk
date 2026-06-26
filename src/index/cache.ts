@@ -12,6 +12,7 @@ const CHUNK_OVERLAP = 10;
 const PREVIEW_CHARS = 180;
 const DEFAULT_MAX_MEMORY_CACHE_ENTRIES = 4;
 const DEFAULT_MAX_MEMORY_CACHE_MB = 512;
+const FINGERPRINT_TTL_MS = 1_000;
 
 interface MemoryEntry {
   fingerprint: string;
@@ -20,7 +21,14 @@ interface MemoryEntry {
   sizeBytes: number;
 }
 
+interface FingerprintEntry {
+  fingerprint: string;
+  files: string[];
+  cachedAt: number;
+}
+
 const memoryCache = new Map<string, MemoryEntry>();
+const fingerprintCache = new Map<string, FingerprintEntry>();
 const indexBuilds = new Map<string, Promise<LexicalIndex>>();
 
 export function cacheRoot(): string {
@@ -31,7 +39,11 @@ function cacheKey(repo: string, scope: string): string {
   return createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${CACHE_VERSION}`).digest("hex").slice(0, 20);
 }
 
-async function fingerprintFiles(repo: string, scope: string): Promise<{ fingerprint: string; files: string[] }> {
+async function fingerprintFiles(repo: string, scope: string, key: string, allowCached: boolean): Promise<{ fingerprint: string; files: string[] }> {
+  const now = Date.now();
+  const cached = fingerprintCache.get(key);
+  if (allowCached && cached && now - cached.cachedAt <= FINGERPRINT_TTL_MS) return { fingerprint: cached.fingerprint, files: cached.files };
+
   const files = await iterFiles(repo, scope);
   const h = createHash("sha256");
   for (const file of files) {
@@ -40,7 +52,9 @@ async function fingerprintFiles(repo: string, scope: string): Promise<{ fingerpr
     const rel = path.relative(repo, file).split(path.sep).join("/");
     h.update(rel).update("\0").update(String(s.size)).update("\0").update(String(s.mtimeMs)).update("\n");
   }
-  return { fingerprint: h.digest("hex"), files };
+  const result = { fingerprint: h.digest("hex"), files };
+  fingerprintCache.set(key, { ...result, cachedAt: Date.now() });
+  return result;
 }
 
 function positiveIntEnv(name: string, fallback: number): number {
@@ -84,6 +98,7 @@ function pruneMemoryCache(protectedKey: string): void {
       .sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
     if (!evictable) break;
     memoryCache.delete(evictable[0]);
+    fingerprintCache.delete(evictable[0]);
     totalBytes -= evictable[1].sizeBytes;
   }
 }
@@ -162,8 +177,8 @@ export async function buildOrLoadIndex(repoInput: string, scope: string): Promis
 async function buildOrLoadIndexUncoordinated(repo: string, scope: string, key: string): Promise<LexicalIndex> {
   const started = performance.now();
   const location = `memory:${key}`;
-  const { fingerprint, files } = await fingerprintFiles(repo, scope);
   const cached = memoryCache.get(key);
+  const { fingerprint, files } = await fingerprintFiles(repo, scope, key, Boolean(cached));
   if (cached?.fingerprint === fingerprint) {
     touchMemoryEntry(key, cached);
     const buildMs = Math.round(performance.now() - started);
