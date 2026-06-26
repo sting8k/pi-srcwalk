@@ -2,15 +2,23 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { executeSearch } from "../../src/engine.js";
-import { executeSemanticGrep, formatSemanticGrepResult } from "../../src/grep/semantic-grep.js";
+import {
+  executeSemanticGrep,
+  formatSemanticGrepResult,
+  selectSemanticGrepEnrichmentTargets,
+  type SemanticGrepEnrichmentRelation,
+  type SemanticGrepInspectEnrichment,
+} from "../../src/grep/semantic-grep.js";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
 import { formatResult } from "../../src/output/format.js";
 import { truncateForTool } from "../../src/output/truncate.js";
 import { commandDisplay } from "../../src/router/intent.js";
+import { parseSymbolFromContext } from "../../src/srcwalk/parse.js";
 import { runCommand } from "../../src/srcwalk/runner.js";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 const QueryParams = Type.Object({
   query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
@@ -29,6 +37,7 @@ const GrepParams = Type.Object({
   context: Type.Optional(Type.Number({ description: "Number of surrounding lines to include around each match." })),
   limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)." })),
   max_results: Type.Optional(Type.Number({ description: "Alias of limit." })),
+  enrich: Type.Optional(Type.Boolean({ description: "Semantic inspect enrichment for top grep results. Enabled by default; set false to disable." })),
 });
 
 const ReviewParams = Type.Object({
@@ -100,6 +109,7 @@ interface SemanticGrepDetails {
   error?: string;
   truncated?: boolean;
   fullOutputPath?: string;
+  enrichment?: { mode: "inspect"; relation: SemanticGrepEnrichmentRelation; inspectId?: string; requested: number; inspected: number; skipped: number; status: string; elapsedMs: number };
 }
 
 
@@ -301,6 +311,96 @@ function formatInspectPacket(repo: string, symbol: string, relation: string, sco
     sections.push("");
   }
   return sections.join("\n");
+}
+
+const SEMANTIC_GREP_ENRICH_LIMIT = 3;
+
+function semanticGrepEnrichmentEnabled(enrich: unknown): boolean {
+  if (enrich === false) return false;
+  if (typeof enrich !== "string") return true;
+  const normalized = enrich.trim().toLowerCase();
+  return !["0", "false", "no", "none", "off"].includes(normalized);
+}
+
+async function buildSemanticGrepInspectEnrichment(
+  result: Awaited<ReturnType<typeof executeSemanticGrep>>,
+  repo: string,
+  signal: AbortSignal | undefined,
+): Promise<SemanticGrepInspectEnrichment | undefined> {
+  if (result.error || !result.matches.length) return undefined;
+
+  const started = performance.now();
+  const relation: SemanticGrepEnrichmentRelation = "all";
+  const { targets, skipped } = selectSemanticGrepEnrichmentTargets(result, SEMANTIC_GREP_ENRICH_LIMIT);
+  if (!targets.length && !skipped.length) return undefined;
+
+  const requestedScope = result.scopes.length === 1 ? result.scopes[0]! : ".";
+  const scope = traceScopeForInspect(repo, requestedScope, relation);
+  const traceScope = scope;
+  const items: SemanticGrepInspectEnrichment["items"] = [];
+  const seenSymbols = new Set<string>();
+  const allCandidates: Array<{ target: string; symbol?: string }> = [];
+
+  for (const target of targets) {
+    if (signal?.aborted) throw new Error("semantic_grep enrichment aborted");
+    const contextCmd: SrcwalkCommand = {
+      label: `grep-context:${target.target}`,
+      args: ["srcwalk", "context", target.target, "--scope", scope, "--budget", "5000"],
+      purpose: "infer grep match symbol before inspect enrichment",
+      parseAs: "context",
+    };
+    const contextResult = await runCommand(repo, contextCmd, signal);
+    if (contextResult.code !== 0) {
+      skipped.push({ target: target.target, reason: `context failed code=${contextResult.code}` });
+      continue;
+    }
+
+    const symbol = parseSymbolFromContext(contextResult.output);
+    if (!symbol) {
+      skipped.push({ target: target.target, reason: "no enclosing symbol inferred from context" });
+      continue;
+    }
+    if (seenSymbols.has(symbol)) {
+      skipped.push({ target: target.target, reason: `symbol ${symbol} already inspected` });
+      continue;
+    }
+
+    seenSymbols.add(symbol);
+    const { results, targets: inspectTargets } = await inspectOneSymbol(symbol, relation, scope, traceScope, repo, signal, 5);
+    items.push({
+      target: target.target,
+      symbol,
+      output: formatInspectPacket(repo, symbol, relation, scope, traceScope, results),
+      targets: inspectTargets,
+    });
+    for (const inspectTarget of inspectTargets) allCandidates.push({ target: inspectTarget, symbol });
+  }
+
+  if (!items.length && !skipped.length) return undefined;
+  const inspectId = items.length ? nextInspectId(repo) : undefined;
+  if (inspectId) {
+    cleanupSearches();
+    recentSearches.set(inspectId, {
+      repo,
+      scope: traceScope,
+      candidates: allCandidates,
+      createdAt: Date.now(),
+      lastAccess: Date.now(),
+    });
+  }
+
+  const status = items.length === 0 ? "skipped" : skipped.length ? "partial" : "complete";
+  return {
+    mode: "inspect",
+    relation,
+    inspectId,
+    status,
+    requested: targets.length,
+    inspected: items.length,
+    skipped,
+    elapsedMs: Math.round(performance.now() - started),
+    items,
+  };
 }
 
 type ReviewTarget = "staged" | "working-tree";
@@ -542,6 +642,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
       "Default mode is regex; set literal=true for exact strings such as dotted paths, versions, or method chains.",
       "Set scopes to one or more dir/file paths when needed; glob only when a file-pattern filter is useful.",
+      "By default, semantic_grep tries inspect enrichment for the top 3 shown matches when a symbol can be inferred; set enrich=false for raw matches only.",
       "Treat semantic_grep as the pi-srcwalk replacement for the default grep tool; avoid built-in grep unless semantic_grep lacks support and say why.",
     ],
     parameters: GrepParams,
@@ -561,9 +662,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         ignoreCase: input.ignoreCase ?? input.ignore_case,
         context: input.context,
         maxResults: input.max_results ?? input.limit,
+        enrich: input.enrich,
       };
     },
-    async execute(_toolCallId: string, params: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+    async execute(_toolCallId: string, params: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number; enrich?: boolean | string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
       const pattern = params.pattern ?? params.query ?? "";
       if (!pattern.trim()) {
         return { content: [{ type: "text", text: "semantic_grep: provide pattern or query." }] };
@@ -582,7 +684,10 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         maxResults: params.maxResults,
         signal,
       });
-      const packet = formatSemanticGrepResult(result);
+      const enrichment = semanticGrepEnrichmentEnabled(params.enrich)
+        ? await buildSemanticGrepInspectEnrichment(result, ctx.cwd, signal)
+        : undefined;
+      const packet = formatSemanticGrepResult(result, enrichment);
       const truncated = await truncateForTool(packet);
       const details: SemanticGrepDetails = {
         pattern: result.pattern,
@@ -596,10 +701,22 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         error: result.error,
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
+        enrichment: enrichment
+          ? {
+              mode: enrichment.mode,
+              relation: enrichment.relation,
+              inspectId: enrichment.inspectId,
+              requested: enrichment.requested,
+              inspected: enrichment.inspected,
+              skipped: enrichment.skipped.length,
+              status: enrichment.status,
+              elapsedMs: enrichment.elapsedMs,
+            }
+          : undefined,
       };
       return { content: [{ type: "text", text: truncated.text }], details };
     },
-    renderCall(args: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean }, theme: ThemeLike) {
+    renderCall(args: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; enrich?: boolean | string }, theme: ThemeLike) {
       const label = args.pattern ?? args.query ?? "";
       const mode = args.regex ? "regex" : args.literal ? "literal" : "regex";
       let text = theme.fg("toolTitle", theme.bold("semantic_grep ")) + theme.fg("accent", `/${label}/`) + theme.fg("dim", ` ${mode}`);
@@ -613,6 +730,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (!details) return new Text(result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "", 0, 0);
       if (details.error) return new Text(theme.fg("warning", `semantic_grep error: ${details.error}`), 0, 0);
       let text = theme.fg("success", `${details.stats.totalMatches} match(es)`) + theme.fg("dim", ` · ${details.backend} · ${details.stats.candidateFiles}/${details.stats.indexedFiles} files`);
+      if (details.enrichment) text += theme.fg("dim", ` · enrich ${details.enrichment.status}:${details.enrichment.inspected}/${details.enrichment.requested}`);
       if (details.stats.truncated) text += theme.fg("warning", " · match limit");
       if (details.truncated) text += theme.fg("warning", " · output truncated");
       if (expanded) {
@@ -945,6 +1063,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "   when anchors are strong → verify exact line matches;",
       "   full-scan fallback when regex is too weak or complex.",
       "   Default mode is regex; set literal=true for exact string matches.",
+      "   It tries inspect enrichment for the top 3 shown matches by default; set enrich=false for raw matches only.",
       "3. **semantic_inspect** — known symbol(s) deep inspect:",
       "   context + callers + callees + references in one shot.",
       "   Accepts one symbol or up to 3 symbols. Runs srcwalk context,",

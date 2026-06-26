@@ -61,6 +61,38 @@ export interface SemanticGrepResult {
   error?: string;
 }
 
+export type SemanticGrepEnrichmentRelation = "all" | "callers" | "callees" | "references";
+
+export interface SemanticGrepEnrichmentTarget {
+  target: string;
+  path: string;
+  line: number;
+}
+
+export interface SemanticGrepEnrichmentSkipped {
+  target?: string;
+  reason: string;
+}
+
+export interface SemanticGrepInspectEnrichmentItem {
+  target: string;
+  symbol: string;
+  output: string;
+  targets: string[];
+}
+
+export interface SemanticGrepInspectEnrichment {
+  mode: "inspect";
+  relation: SemanticGrepEnrichmentRelation;
+  inspectId?: string;
+  status: "skipped" | "complete" | "partial";
+  requested: number;
+  inspected: number;
+  skipped: SemanticGrepEnrichmentSkipped[];
+  elapsedMs: number;
+  items: SemanticGrepInspectEnrichmentItem[];
+}
+
 interface IndexedFile {
   rel: string;
   displayPath: string;
@@ -348,6 +380,43 @@ function contextAfter(lines: string[], idx: number, count: number): Array<{ line
   return out;
 }
 
+function isRepoRelativeGrepPath(matchPath: string): boolean {
+  return Boolean(matchPath) && !path.isAbsolute(matchPath) && !matchPath.startsWith("../") && matchPath !== "..";
+}
+
+export function selectSemanticGrepEnrichmentTargets(
+  result: Pick<SemanticGrepResult, "error" | "matches">,
+  limit: number,
+): { targets: SemanticGrepEnrichmentTarget[]; skipped: SemanticGrepEnrichmentSkipped[] } {
+  const maxTargets = Math.max(1, Math.floor(limit));
+  const skipped: SemanticGrepEnrichmentSkipped[] = [];
+  if (result.error) return { targets: [], skipped: [{ reason: `grep error: ${result.error}` }] };
+  if (!result.matches.length) return { targets: [], skipped: [{ reason: "no shown grep matches" }] };
+
+  const selected: SemanticGrepEnrichmentTarget[] = [];
+  const seenTargets = new Set<string>();
+  let eligibleOverflow = false;
+
+  for (const match of result.matches) {
+    if (!isRepoRelativeGrepPath(match.path)) {
+      skipped.push({ target: `${match.path}:${match.line}`, reason: "match path is outside the repo" });
+      continue;
+    }
+    const target = `${match.path}:${match.line}`;
+    if (seenTargets.has(target)) continue;
+    if (selected.length >= maxTargets) {
+      eligibleOverflow = true;
+      continue;
+    }
+    selected.push({ target, path: match.path, line: match.line });
+    seenTargets.add(target);
+  }
+
+  if (eligibleOverflow) skipped.push({ reason: `enrichment target limit reached (${maxTargets})` });
+
+  return { targets: selected, skipped };
+}
+
 export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): Promise<SemanticGrepResult> {
   const queryStarted = performance.now();
   const repo = path.resolve(options.repo ?? process.cwd());
@@ -488,7 +557,7 @@ function matchLines(match: SemanticGrepMatch, withContext: boolean): string[] {
   return lines;
 }
 
-export function formatSemanticGrepResult(result: SemanticGrepResult): string {
+export function formatSemanticGrepResult(result: SemanticGrepResult, enrichment?: SemanticGrepInspectEnrichment): string {
   const lines: string[] = [
     `# semantic-grep ts: ${result.pattern}`,
     `repo: ${result.repo}`,
@@ -523,5 +592,31 @@ export function formatSemanticGrepResult(result: SemanticGrepResult): string {
       lines.push("```", "");
     }
   }
+  if (enrichment) {
+    if (lines.at(-1) !== "") lines.push("");
+    lines.push(...formatSemanticGrepEnrichment(enrichment));
+  }
   return lines.join("\n");
+}
+
+export function formatSemanticGrepEnrichment(enrichment: SemanticGrepInspectEnrichment): string[] {
+  const lines = [
+    "## Inspect enrichment",
+    `- mode: inspect; relation: ${enrichment.relation}; status: ${enrichment.status}`,
+    `- requested_targets: ${enrichment.requested}; inspected_symbols: ${enrichment.inspected}; skipped: ${enrichment.skipped.length}; elapsed_ms: ${enrichment.elapsedMs}`,
+  ];
+  if (enrichment.inspectId) lines.push(`- inspect_id: ${enrichment.inspectId}`);
+  if (enrichment.skipped.length) {
+    lines.push("", "### Skipped");
+    for (const skipped of enrichment.skipped.slice(0, 8)) {
+      lines.push(`- ${skipped.target ? `${skipped.target}: ` : ""}${skipped.reason}`);
+    }
+    if (enrichment.skipped.length > 8) lines.push(`- ... ${enrichment.skipped.length - 8} more`);
+  }
+  for (const item of enrichment.items) {
+    lines.push("", `### ${item.symbol} — ${item.target}`);
+    const output = item.output.trim();
+    lines.push(output || "(empty inspect output)");
+  }
+  return lines;
 }
