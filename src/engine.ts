@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Candidate, DetailLevel, SearchResult, SrcwalkCommand } from "./domain/types.js";
+import type { Candidate, CommandResult, DetailLevel, SearchResult, SrcwalkCommand } from "./domain/types.js";
 import { bm25Search, shouldRunBm25 } from "./index/bm25.js";
 import { buildPlan, domainKeywords, makeCmd, strongSymbolAnchors, validateScope } from "./router/intent.js";
 import { confidenceReport } from "./ranking/confidence.js";
@@ -15,6 +15,32 @@ export interface ExecuteSearchOptions {
   detail?: DetailLevel;
   commandBudget?: number;
   signal?: AbortSignal;
+}
+
+const COMMAND_CONCURRENCY = 4;
+
+async function runCommandBatch(repo: string, commands: SrcwalkCommand[], signal?: AbortSignal): Promise<CommandResult[]> {
+  if (!commands.length) return [];
+  const results = new Array<CommandResult>(commands.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < commands.length) {
+      const index = next;
+      next += 1;
+      results[index] = await runCommand(repo, commands[index]!, signal);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COMMAND_CONCURRENCY, commands.length) }, worker));
+  return results;
+}
+
+async function expandCandidate(repo: string, cand: Candidate, scope: string, signal?: AbortSignal): Promise<{ cand: Candidate; exp: CommandResult; didDeps: boolean }> {
+  if (cand.source === "file-deps" || cand.commandLabel === "file-deps") {
+    return { cand, exp: await runCommand(repo, depsCmd(candidateFile(cand), "3500"), signal), didDeps: true };
+  }
+  let exp = await runCommand(repo, candidateToContextCmd(cand, scope), signal);
+  if (exp.code !== 0) exp = await runCommand(repo, candidateToShowCmd(cand), signal);
+  return { cand, exp, didDeps: false };
 }
 
 function dedupeCommands(commands: SrcwalkCommand[]): SrcwalkCommand[] {
@@ -90,8 +116,8 @@ export async function executeSearch(options: ExecuteSearchOptions): Promise<Sear
   if (addFusion) commands = [...commands, ...extraFusionCommands(plan)];
   if (!commands.length) commands = plan.commands;
 
-  for (const command of commands.slice(0, commandBudget)) {
-    const result = await runCommand(repo, command, options.signal);
+  for (const result of await runCommandBatch(repo, commands.slice(0, commandBudget), options.signal)) {
+    const command = result.command;
     commandResults.push(result);
     if (result.code !== 0) {
       notes.push(`${command.label} failed with code ${result.code}`);
@@ -135,26 +161,22 @@ export async function executeSearch(options: ExecuteSearchOptions): Promise<Sear
   let didDeps = false;
   if (top.length) {
     const contextLimit = detail === "brief" || ["callers", "callees", "deps", "impact"].includes(plan.intent) ? 1 : maxResults;
-    for (const cand of top.slice(0, contextLimit)) {
-      let exp;
-      if (cand.source === "file-deps" || cand.commandLabel === "file-deps") {
-        exp = await runCommand(repo, depsCmd(candidateFile(cand), "3500"), options.signal);
-        didDeps = true;
-      } else {
-        exp = await runCommand(repo, candidateToContextCmd(cand, plan.scope), options.signal);
-        if (exp.code !== 0) exp = await runCommand(repo, candidateToShowCmd(cand), options.signal);
-      }
+    const expanded = await Promise.all(top.slice(0, contextLimit).map((cand) => expandCandidate(repo, cand, plan.scope, options.signal)));
+    for (const { cand, exp, didDeps: expandedDeps } of expanded) {
+      didDeps = didDeps || expandedDeps;
       expansions.push(exp);
       if (!cand.symbol) cand.symbol = parseSymbolFromContext(exp.output);
     }
 
     const primary = top[0]!;
     const symbol = fallbackSymbol(plan, primary);
-    if (plan.shouldTraceCallers && symbol) expansions.push(await runCommand(repo, traceCmd("callers", symbol, plan.scope), options.signal));
-    if (plan.shouldTraceCallees && symbol) expansions.push(await runCommand(repo, traceCmd("callees", symbol, plan.scope), options.signal));
-    if (plan.shouldGetDeps && !didDeps) expansions.push(await runCommand(repo, depsCmd(candidateFile(primary)), options.signal));
-    if (plan.shouldAssess && symbol) expansions.push(await runCommand(repo, assessCmd(symbol, plan.scope), options.signal));
-    if (detail === "deep" && !plan.shouldGetDeps) expansions.push(await runCommand(repo, depsCmd(candidateFile(primary)), options.signal));
+    const followups: SrcwalkCommand[] = [];
+    if (plan.shouldTraceCallers && symbol) followups.push(traceCmd("callers", symbol, plan.scope));
+    if (plan.shouldTraceCallees && symbol) followups.push(traceCmd("callees", symbol, plan.scope));
+    if (plan.shouldGetDeps && !didDeps) followups.push(depsCmd(candidateFile(primary)));
+    if (plan.shouldAssess && symbol) followups.push(assessCmd(symbol, plan.scope));
+    if (detail === "deep" && !plan.shouldGetDeps) followups.push(depsCmd(candidateFile(primary)));
+    expansions.push(...await runCommandBatch(repo, followups, options.signal));
   }
 
   if (!expansions.length && commandResults.length) {

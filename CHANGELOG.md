@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.5] - 2026-06-26
+
+### Changed
+- `semantic_query` engine now runs independent srcwalk command batches and candidate expansions concurrently with bounded concurrency, while preserving the original command and expansion output order.
+- BM25 scoring and PRF term selection use a bounded top-k partial selection instead of full sort, reducing per-query allocations.
+- A short process-local fingerprint cache avoids re-walking and re-stating the scope file tree between warm queries within the TTL window.
+
+### Notes
+- Output and ranking semantics are unchanged on the same repository snapshot. Only `elapsedMs` and cache timing fields differ. The fingerprint TTL introduces a small staleness window (<1s) between file changes and the next search.
+
 ## [1.2.4] - 2026-06-26
 
 ### Changed
