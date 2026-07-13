@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { boundShowOutput, showTargetStatus, splitShowTargets } from "../../src/output/show.js";
+import { getRuntimeModules } from "../../src/runtime/module-load.js";
 
 const QueryParams = Type.Object({
   query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
@@ -249,7 +250,7 @@ async function inspectOneSymbol(
   signal: AbortSignal | undefined,
   limit: number,
 ): Promise<{ results: Array<{ code: number; output: string; command: SrcwalkCommand }>; targets: string[] }> {
-  const { runCommand } = await import("../../src/srcwalk/runner.js");
+  const { runCommand } = (await getRuntimeModules()).runner;
   const commands = inspectCommands(symbol, relation, scope, traceScope, limit);
   const results: Array<{ code: number; output: string; command: SrcwalkCommand }> = [];
 
@@ -317,11 +318,7 @@ async function buildSemanticGrepInspectEnrichment(
 ): Promise<SemanticGrepInspectEnrichment | undefined> {
   if (result.error || !result.matches.length) return undefined;
 
-  const [semanticGrep, parser, runner] = await Promise.all([
-    import("../../src/grep/semantic-grep.js"),
-    import("../../src/srcwalk/parse.js"),
-    import("../../src/srcwalk/runner.js"),
-  ]);
+  const { grep: semanticGrep, parser, runner } = await getRuntimeModules();
   const started = performance.now();
   const relation: SemanticGrepEnrichmentRelation = "all";
   const { targets, skipped } = semanticGrep.selectSemanticGrepEnrichmentTargets(result, SEMANTIC_GREP_ENRICH_LIMIT);
@@ -562,12 +559,8 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       return { query: input.query, scope: input.scope };
     },
     async execute(_toolCallId: string, params: { query: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
+      const { engine: { executeSearch }, format: { formatResult }, truncate: { truncateForTool } } = await getRuntimeModules();
       onUpdate?.({ content: [{ type: "text", text: "Running semantic_query..." }] });
-      const [{ executeSearch }, { formatResult }, { truncateForTool }] = await Promise.all([
-        import("../../src/engine.js"),
-        import("../../src/output/format.js"),
-        import("../../src/output/truncate.js"),
-      ]);
       const result = await executeSearch({
         query: params.query,
         repo: ctx.cwd,
@@ -664,10 +657,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { pattern?: string; query?: string; scopes?: string[]; glob?: string; literal?: boolean; regex?: boolean; ignoreCase?: boolean; context?: number; maxResults?: number; enrich?: boolean | string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      const [{ executeSemanticGrep, formatSemanticGrepResult }, { truncateForTool }] = await Promise.all([
-        import("../../src/grep/semantic-grep.js"),
-        import("../../src/output/truncate.js"),
-      ]);
+      const { grep: { executeSemanticGrep, formatSemanticGrepResult }, truncate: { truncateForTool } } = await getRuntimeModules();
       const pattern = params.pattern ?? params.query ?? "";
       if (!pattern.trim()) {
         return { content: [{ type: "text", text: "semantic_grep: provide pattern or query." }] };
@@ -772,7 +762,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { symbol?: string; symbols?: string[]; relation?: string; scope?: string; limit?: number }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      const { truncateForTool } = await import("../../src/output/truncate.js");
+      const { truncate: { truncateForTool } } = await getRuntimeModules();
       const rawSymbols = params.symbols ?? (params.symbol ? [params.symbol] : []);
       const relation = params.relation ?? "all";
       const scope = params.scope?.trim() || ".";
@@ -892,11 +882,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       return { target: input.target, scope: input.scope };
     },
     async execute(_toolCallId: string, params: { target?: string; scope?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      const [{ runCommand }, { commandDisplay }, { truncateForTool }] = await Promise.all([
-        import("../../src/srcwalk/runner.js"),
-        import("../../src/router/intent.js"),
-        import("../../src/output/truncate.js"),
-      ]);
+      const { runner: { runCommand }, router: { commandDisplay }, truncate: { truncateForTool } } = await getRuntimeModules();
       const target = normalizeReviewTarget(params.target);
       const scope = params.scope?.trim() || ".";
       const reviewCtx = resolveReviewContext(ctx.cwd, scope);
@@ -961,10 +947,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId: string, params: { search_id?: string; inspect_id?: string; candidate_id?: number; target?: string }, signal: AbortSignal | undefined, onUpdate: ((update: { content: Array<{ type: "text"; text: string }> }) => void) | undefined, ctx: { cwd: string }) {
-      const [{ runCommand }, { truncateForTool }] = await Promise.all([
-        import("../../src/srcwalk/runner.js"),
-        import("../../src/output/truncate.js"),
-      ]);
+      const { runner: { runCommand }, truncate: { truncateForTool } } = await getRuntimeModules();
       // Resolve target from params
       let targets: string[];
       let candidateInfo: string;

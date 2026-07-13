@@ -28,6 +28,7 @@ Keep the five semantic tools predictable at their public boundaries: an explicit
 - A direct comma-separated `semantic_show` target list is bounded and validated, runs one `srcwalk show` command per target with its own 5000-token budget, and renders a section/status for every target. Successful outline/caveat output is reported as degraded/non-exact rather than `ok`.
 - Successful overview output yields bounded candidates only for existing repo-relative files, retains line/range targets when present, and registers those candidates through the existing `semantic_query` handoff so `semantic_show` can follow them. Directory-only or candidate-less overview output remains graceful.
 - Existing single-target show behavior and overview expansion behavior remain intact.
+- Concurrent first tool calls after Pi reload wait on one shared, retryable runtime-module preload instead of starting independent dynamic-import roots.
 
 ## Design Notes
 
@@ -70,3 +71,4 @@ This story records the public-contract hardening for scope ownership, diagnostic
 - Smoke: explicit overview scope `src` remained `src` despite `extensions/pi-srcwalk` in query text ✅.
 - Smoke: explicit test-intent scope `src` remained `src` after reviewer regression fix ✅.
 - Reviewer: initial rework finding on test-intent scope override fixed; final validation rerun passed.
+- Follow-up guard: shared runtime-module preload is single-flight for concurrent cold calls and resets after a failed preload; `npm test` now passes 33/33.

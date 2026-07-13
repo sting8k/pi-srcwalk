@@ -8,6 +8,7 @@ import type { CommandResult } from "../src/domain/types.js";
 import { formatInspectCommandResult } from "../src/output/format.js";
 import { boundShowOutput, showTargetStatus, splitShowTargets } from "../src/output/show.js";
 import { parseOverviewCandidates } from "../src/srcwalk/parse.js";
+import { createModuleLoadGuard } from "../src/runtime/module-load.js";
 
 function overviewResult(output: string, code = 0): CommandResult {
   return {
@@ -85,4 +86,35 @@ test("parseOverviewCandidates keeps bounded existing repo-relative files and ran
   assert.equal(result.every((candidate) => candidate.kind !== "directory"), true);
   assert.deepEqual(parseOverviewCandidates(overviewResult("src/\nnested.with.dot/", 0), repo, "."), []);
   assert.deepEqual(parseOverviewCandidates(overviewResult("src/a.ts:1", 2), repo, "."), []);
+});
+
+test("runtime module guard single-flights concurrent cold loads and retries failures", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const namespace = { runner: { runCommand: () => undefined } };
+  const guard = createModuleLoadGuard(async () => {
+    calls += 1;
+    await gate;
+    return namespace;
+  });
+
+  const first = guard();
+  const second = guard();
+  assert.equal(calls, 1);
+  release?.();
+  const [firstNamespace, secondNamespace] = await Promise.all([first, second]);
+  assert.strictEqual(firstNamespace, namespace);
+  assert.strictEqual(secondNamespace, namespace);
+  assert.strictEqual(await guard(), namespace);
+  assert.equal(calls, 1);
+
+  let attempts = 0;
+  const retryingGuard = createModuleLoadGuard(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("cold load failed");
+  });
+  await assert.rejects(retryingGuard(), /cold load failed/);
+  await retryingGuard();
+  assert.equal(attempts, 2);
 });
