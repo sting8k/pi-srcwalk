@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import path from "node:path";
 import type { Candidate, CommandResult, QueryPlan, SrcwalkCommand } from "../domain/types.js";
 import { commandDisplay, extractTarget, makeCmd, strongestSymbol } from "../router/intent.js";
@@ -10,6 +11,9 @@ const DEF_GROUP_FILE_RE = /^\s{2}(?<file>[\w./-]+\.\w+)\s+\[\d+ matches\]/;
 const DEF_GROUP_ITEM_RE = /^\s{4}\[(?<kind>[^\]]+)\]\s+(?<symbol>[A-Za-z_][\w]*)\s+:(?<range>\d+(?:-\d+)?)/;
 const TEXT_RANK_FILE_RE = /^(?<file>[\w./-]+\.\w+)\s+—\s+(?<terms>\d+) terms?,/;
 const SYMBOL_FROM_CONTEXT_RE = /^-\s+[\w./-]+\.\w+:\d+(?:-\d+)?\s+(?<symbol>[A-Za-z_][\w]*)$/m;
+const OVERVIEW_FILE_RE = /(?<![\w./-])(?<file>(?:\.{1,2}\/)?[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z0-9]{1,12})(?::(?<range>\d+(?:-\d+)?))?/g;
+const OVERVIEW_LINE_RANGE_RE = /\[(?<range>\d+(?:-\d+)?)\]/;
+const MAX_OVERVIEW_CANDIDATES = 20;
 
 export function candidateFile(candidate: Pick<Candidate, "target">): string {
   return candidate.target.split(":", 1)[0]!;
@@ -63,6 +67,68 @@ export function parseCandidates(result: CommandResult): Candidate[] {
     }
   }
   return [...candidates.values()].sort((a, b) => b.score - a.score);
+}
+
+function overviewFileTarget(repo: string, scope: string, rawFile: string): string | undefined {
+  if (path.isAbsolute(rawFile) || rawFile.startsWith("../")) return undefined;
+  const repoRoot = path.resolve(repo);
+  const scopeRoot = path.resolve(repoRoot, scope || ".");
+  const candidates = rawFile.includes("/")
+    ? [path.resolve(repoRoot, rawFile), path.resolve(scopeRoot, rawFile)]
+    : [path.resolve(scopeRoot, rawFile), path.resolve(repoRoot, rawFile)];
+  const seen = new Set<string>();
+  for (const absolute of candidates) {
+    if (seen.has(absolute)) continue;
+    seen.add(absolute);
+    const relative = path.relative(repoRoot, absolute);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    try {
+      if (!statSync(absolute).isFile()) continue;
+    } catch {
+      continue;
+    }
+    return relative.split(path.sep).join("/");
+  }
+  return undefined;
+}
+
+function validOverviewRange(rawRange: string | undefined): string | undefined {
+  if (!rawRange) return "1";
+  const [start, end = start] = rawRange.split("-").map(Number);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return undefined;
+  return rawRange;
+}
+
+export function parseOverviewCandidates(result: CommandResult, repo: string, scope: string, limit = 10): Candidate[] {
+  if (result.code !== 0 || result.command.parseAs !== "overview" || !result.output.trim()) return [];
+  const max = Math.max(1, Math.min(limit, MAX_OVERVIEW_CANDIDATES));
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of result.output.split("\n")) {
+    const line = rawLine.trim();
+    const lineRange = line.match(OVERVIEW_LINE_RANGE_RE)?.groups?.range;
+    for (const match of line.matchAll(OVERVIEW_FILE_RE)) {
+      const rawFile = match.groups?.file;
+      if (!rawFile) continue;
+      const file = overviewFileTarget(repo, scope, rawFile);
+      if (!file) continue;
+      const range = validOverviewRange(match.groups?.range ?? lineRange);
+      if (!range) continue;
+      const target = `${file}:${range}`;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      candidates.push({
+        target,
+        source: "overview",
+        commandLabel: result.command.label,
+        kind: range === "1" ? "file" : "section",
+        score: range === "1" ? 60 : 70,
+        evidence: [line.slice(0, 240)],
+      });
+      if (candidates.length >= max) return candidates;
+    }
+  }
+  return candidates;
 }
 
 export function parseFileDiscoverCandidates(result: CommandResult): Candidate[] {

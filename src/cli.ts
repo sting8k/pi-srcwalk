@@ -15,7 +15,7 @@ if (!query) {
 const result = await executeSearch({
   query,
   repo: readArg("--repo", process.cwd()),
-  scope: readArg("--scope", "."),
+  scope: readArg("--scope"),
   maxResults: Number(readArg("--max-results", "3")),
   detail: (readArg("--detail", "normal") as "brief" | "normal" | "deep"),
 });

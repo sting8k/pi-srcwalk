@@ -7,6 +7,24 @@ function commandLine(result: CommandResult): string {
   return `- [${status}, ${result.elapsedMs}ms${matches}] ${result.command.label}: ${commandDisplay(result.command)}`;
 }
 
+const INSPECT_FAILURE_OUTPUT_MAX_CHARS = 4000;
+
+function boundedInspectOutput(output: string): string {
+  const trimmed = output.trim();
+  if (trimmed.length <= INSPECT_FAILURE_OUTPUT_MAX_CHARS) return trimmed;
+  return `${trimmed.slice(0, INSPECT_FAILURE_OUTPUT_MAX_CHARS)}\n... (CLI output truncated)`;
+}
+
+export function formatInspectCommandResult(result: Pick<CommandResult, "code" | "output">): string[] {
+  const output = result.code === 0 ? result.output.trim() : boundedInspectOutput(result.output);
+  if (result.code !== 0) {
+    const lines = [`(command failed code=${result.code})`];
+    if (output) lines.push("```text", output, "```");
+    return lines;
+  }
+  return [output || "(none)"];
+}
+
 function expansionTarget(label: string): string {
   const idx = label.indexOf(":");
   return idx >= 0 ? label.slice(idx + 1) : label;

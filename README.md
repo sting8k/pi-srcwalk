@@ -108,6 +108,9 @@ Every result includes:
 
 When `semantic_query` abstains (`abstained: true`), it means no strong match was found — do not fabricate evidence from thin air.
 
+- An explicitly supplied `scope` is immutable. Overview path inference is used only when the caller omits `scope`.
+- A successful overview may also return bounded, repo-relative file candidates with IDs for follow-up `semantic_show`; directory-only overview output remains candidate-free.
+
 ### `semantic_grep`
 
 Use this for regex search by default. Set `literal: true` for exact strings, and add `scopes`, `glob`, `ignoreCase`, or `context` only when needed.
@@ -143,6 +146,7 @@ What it does:
   - `references` — symbol matches / reference candidates
 - Default `relation: "all"` returns Context, Callers, Callees, and References.
 - Results include `inspect_id` so targets can be opened with `semantic_show`.
+- Failed inspect commands preserve their exit code and bounded non-empty CLI output for both single- and multi-symbol packets.
 
 ```ts
 // Full inspect for one known symbol
@@ -169,6 +173,8 @@ What it does:
 - Opens a candidate from `semantic_inspect` using `inspect_id + candidate_id`.
 - Also accepts direct targets, including multi-target strings like `a.ts:10,b.ts:20-30`.
 - Does not run `srcwalk context` or relation traces. For structural context around a known symbol, use `semantic_inspect`.
+- Direct multi-target input is bounded to three `path:line`/`path:start-end` targets and runs one `srcwalk show --budget 5000` per target.
+- Multi-target output has one section and status per target; outline/caveat output is marked `degraded (non-exact output)` rather than `ok`.
 
 ```ts
 // Open candidate #1 from a previous search
