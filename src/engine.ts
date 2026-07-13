@@ -4,7 +4,7 @@ import { bm25Search, shouldRunBm25 } from "./index/bm25.js";
 import { buildPlan, domainKeywords, makeCmd, strongSymbolAnchors, validateScope } from "./router/intent.js";
 import { confidenceReport } from "./ranking/confidence.js";
 import { bm25HasStrongCluster, cloneCandidate, dedupeRanked, rrfFuse, scoreCandidates } from "./ranking/rank.js";
-import { assessCmd, candidateFile, candidateToContextCmd, candidateToShowCmd, depsCmd, fallbackSymbol, parseCandidates, parseFileDiscoverCandidates, parseSymbolFromContext, synthesizeCandidateFromCommand, traceCmd } from "./srcwalk/parse.js";
+import { assessCmd, candidateFile, candidateToContextCmd, candidateToShowCmd, depsCmd, fallbackSymbol, parseCandidates, parseFileDiscoverCandidates, parseOverviewCandidates, parseSymbolFromContext, synthesizeCandidateFromCommand, traceCmd } from "./srcwalk/parse.js";
 import { runCommand } from "./srcwalk/runner.js";
 
 export interface ExecuteSearchOptions {
@@ -84,7 +84,7 @@ function extraFusionCommands(plan: ReturnType<typeof buildPlan>): SrcwalkCommand
 
 export async function executeSearch(options: ExecuteSearchOptions): Promise<SearchResult> {
   const repo = path.resolve(options.repo ?? process.cwd());
-  const scope = validateScope(options.scope ?? ".");
+  const scope = options.scope === undefined ? undefined : validateScope(options.scope);
   const maxResults = Math.max(1, Math.min(options.maxResults ?? 3, 10));
   const detail = options.detail ?? "normal";
   const commandBudget = options.commandBudget ?? 10;
@@ -123,18 +123,23 @@ export async function executeSearch(options: ExecuteSearchOptions): Promise<Sear
       notes.push(`${command.label} failed with code ${result.code}`);
       continue;
     }
-    const parsed = parseCandidates(result);
-    structuralCandidates.push(...parsed);
-    if (command.parseAs === "discover" && command.args.includes("file")) structuralCandidates.push(...parseFileDiscoverCandidates(result));
-    structuralCandidates.push(...synthesizeCandidateFromCommand(result, plan));
+    if (command.parseAs === "overview") {
+      structuralCandidates.push(...parseOverviewCandidates(result, repo, plan.scope, plan.maxResults));
+    } else {
+      const parsed = parseCandidates(result);
+      structuralCandidates.push(...parsed);
+      if (command.parseAs === "discover" && command.args.includes("file")) structuralCandidates.push(...parseFileDiscoverCandidates(result));
+      structuralCandidates.push(...synthesizeCandidateFromCommand(result, plan));
+    }
   }
 
   if (plan.queryKind === "overview") {
-    const confidence = confidenceReport(plan, []);
+    const candidates = scoreCandidates(dedupeRanked(structuralCandidates.map(cloneCandidate)), plan).slice(0, plan.maxResults);
+    const confidence = confidenceReport(plan, candidates);
     const overviewExpansion = commandResults.find((r) => r.command.parseAs === "overview" && r.code === 0 && r.output.trim());
     if (overviewExpansion) expansions.push(overviewExpansion);
     else if (commandResults.length) expansions.push(commandResults.find((r) => r.code === 0 && r.output.trim()) ?? commandResults.at(-1)!);
-    return { plan, commandResults, candidates: [], expansions, notes, confidence, cache };
+    return { plan, commandResults, candidates, expansions, notes, confidence, cache };
   }
 
   const rankLists: Array<[string, Candidate[], number]> = [];

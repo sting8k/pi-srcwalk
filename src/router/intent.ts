@@ -264,7 +264,9 @@ function attachHints(plan: QueryPlan, ir: QueryIR): QueryPlan {
   return plan;
 }
 
-export function buildPlan(query: string, repo: string, scope = ".", maxResults = 3, detail: DetailLevel = "normal"): QueryPlan {
+export function buildPlan(query: string, repo: string, scope?: string, maxResults = 3, detail: DetailLevel = "normal"): QueryPlan {
+  const effectiveScope = scope === undefined ? "." : validateScope(scope);
+  const inferOverviewScope = scope === undefined;
   const queryIR = parseQueryIR(query);
   const routingQuery = queryIR.hasHints ? queryIR.cleanQuery : query;
   const intent = detectIntent(routingQuery);
@@ -275,7 +277,7 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
   const shouldGetDeps = intent === "deps" || intent === "impact";
   const shouldAssess = intent === "impact";
 
-  const base = (queryKind: QueryPlan["queryKind"], chosenScope = scope): QueryPlan => attachHints({
+  const base = (queryKind: QueryPlan["queryKind"], chosenScope = effectiveScope): QueryPlan => attachHints({
     query: routingQuery,
     rawQuery: query,
     queryIR: queryIR.hasHints ? queryIR : undefined,
@@ -295,13 +297,14 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
 
   const target = extractTarget(routingQuery);
   if (target) {
-    commands.push(makeCmd("target-context", ["context", target, "--scope", scope, "--budget", "3500"], "exact target context", "context"));
+    commands.push(makeCmd("target-context", ["context", target, "--scope", effectiveScope, "--budget", "3500"], "exact target context", "context"));
     return base("explicit_target");
   }
 
   if (intent === "overview") {
     const pathTokens = routingQuery.split(/\s+/).filter((t) => t.includes("/"));
-    const overviewScope = pathTokens.at(-1)?.replace(/^['`]|['`]$/g, "") ?? scope;
+    const inferredScope = pathTokens.at(-1)?.replace(/^['`]|['`]$/g, "");
+    const overviewScope = inferOverviewScope ? (inferredScope ?? effectiveScope) : effectiveScope;
     commands.push(makeCmd("overview", ["overview", "--scope", overviewScope, "--symbols"], "module/project overview", "overview"));
     return base("overview", overviewScope);
   }
@@ -313,7 +316,7 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
       return base("file_deps");
     }
     commands.push(makeCmd("file-show", ["show", fileOrPath, "--budget", "3500"], "exact file read", "show"));
-    commands.push(makeCmd("file-discover", ["discover", fileOrPath, "--as", "file", "--scope", scope, "--limit", "8", "--budget", "2500"], "file discovery fallback", "discover"));
+    commands.push(makeCmd("file-discover", ["discover", fileOrPath, "--as", "file", "--scope", effectiveScope, "--limit", "8", "--budget", "2500"], "file discovery fallback", "discover"));
     return base("file");
   }
 
@@ -323,15 +326,15 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
   const symbol = intent === "definition" && keywords.length ? keywords[0]! : strongestSymbol(routingQuery, keywords);
 
   if (["callers", "callees", "deps", "impact", "definition"].includes(intent)) {
-    commands.push(makeCmd("symbol-exact", ["discover", symbol, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "3000"], "intent symbol lookup", "discover"));
-    commands.push(makeCmd("symbol-lower", ["discover", symbol.toLowerCase(), "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "2500"], "case fallback", "discover"));
-    commands.push(makeCmd("symbol-glob", ["discover", `*${symbol.toLowerCase()}*`, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "2500"], "case/glob fallback", "discover"));
-    if (keywords.length) commands.push(makeCmd("text-any", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", scope, "--limit", "10", "--budget", "3000"], "text fallback", "discover"));
+    commands.push(makeCmd("symbol-exact", ["discover", symbol, "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "3000"], "intent symbol lookup", "discover"));
+    commands.push(makeCmd("symbol-lower", ["discover", symbol.toLowerCase(), "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "2500"], "case fallback", "discover"));
+    commands.push(makeCmd("symbol-glob", ["discover", `*${symbol.toLowerCase()}*`, "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "2500"], "case/glob fallback", "discover"));
+    if (keywords.length) commands.push(makeCmd("text-any", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", effectiveScope, "--limit", "10", "--budget", "3000"], "text fallback", "discover"));
     return base("intent_symbol");
   }
 
   if (intent === "test") {
-    const testScope = existsSync(path.join(repo, "tests")) ? "tests" : scope;
+    const testScope = scope === undefined && existsSync(path.join(repo, "tests")) ? "tests" : effectiveScope;
     if (keywords.length) {
       commands.push(makeCmd("test-text", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", testScope, "--limit", "12", "--budget", "3000"], "test/example text lookup", "discover"));
       commands.push(makeCmd("test-symbol", ["discover", `*${keywords[0]}*`, "--as", "symbol", "--scope", testScope, "--limit", "12", "--budget", "2500"], "test/example symbol lookup", "discover"));
@@ -342,22 +345,22 @@ export function buildPlan(query: string, repo: string, scope = ".", maxResults =
   if (isSymbolLike(routingQuery)) {
     const q = routingQuery.trim().replace(/^['`]|['`]$/g, "");
     keywords = [q];
-    commands.push(makeCmd("symbol-exact", ["discover", q, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "3000"], "exact symbol lookup", "discover"));
-    commands.push(makeCmd("symbol-lower", ["discover", q.toLowerCase(), "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "2500"], "case fallback", "discover"));
-    commands.push(makeCmd("symbol-glob", ["discover", `*${q.toLowerCase()}*`, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "2500"], "glob fallback", "discover"));
-    commands.push(makeCmd("symbol-text", ["discover", q, "--as", "text", "--scope", scope, "--limit", "10", "--budget", "2500"], "text fallback", "discover"));
+    commands.push(makeCmd("symbol-exact", ["discover", q, "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "3000"], "exact symbol lookup", "discover"));
+    commands.push(makeCmd("symbol-lower", ["discover", q.toLowerCase(), "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "2500"], "case fallback", "discover"));
+    commands.push(makeCmd("symbol-glob", ["discover", `*${q.toLowerCase()}*`, "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "2500"], "glob fallback", "discover"));
+    commands.push(makeCmd("symbol-text", ["discover", q, "--as", "text", "--scope", effectiveScope, "--limit", "10", "--budget", "2500"], "text fallback", "discover"));
     return base("symbol");
   }
 
   if (keywords.length) {
     const anchors = strongSymbolAnchors(keywords);
     for (const anchor of anchors) {
-      commands.push(makeCmd(`symbol-exact-${anchor.toLowerCase()}`, ["discover", anchor, "--as", "symbol", "--scope", scope, "--limit", "10", "--budget", "3000"], "exact symbol anchor lookup", "discover"));
+      commands.push(makeCmd(`symbol-exact-${anchor.toLowerCase()}`, ["discover", anchor, "--as", "symbol", "--scope", effectiveScope, "--limit", "10", "--budget", "3000"], "exact symbol anchor lookup", "discover"));
     }
-    commands.push(makeCmd("text-any", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", scope, "--limit", "12", "--budget", "3000"], "natural language text lookup", "discover"));
-    commands.push(makeCmd("symbol-glob", ["discover", `*${keywords[0]!.toLowerCase()}*`, "--as", "symbol", "--scope", scope, "--limit", "12", "--budget", "2500"], "symbol fallback for strongest keyword", "discover"));
+    commands.push(makeCmd("text-any", ["discover", keywords.slice(0, 4).join(","), "--match", "any", "--as", "text", "--scope", effectiveScope, "--limit", "12", "--budget", "3000"], "natural language text lookup", "discover"));
+    commands.push(makeCmd("symbol-glob", ["discover", `*${keywords[0]!.toLowerCase()}*`, "--as", "symbol", "--scope", effectiveScope, "--limit", "12", "--budget", "2500"], "symbol fallback for strongest keyword", "discover"));
   }
-  commands.push(makeCmd("overview-fallback", ["overview", "--scope", scope, "--symbols"], "last-resort orientation", "overview"));
+  commands.push(makeCmd("overview-fallback", ["overview", "--scope", effectiveScope, "--symbols"], "last-resort orientation", "overview"));
   return base("general");
 }
 

@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
+import { formatInspectCommandResult } from "../../src/output/format.js";
 import type {
   SemanticGrepEnrichmentRelation,
   SemanticGrepInspectEnrichment,
@@ -11,6 +12,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { boundShowOutput, showTargetStatus, splitShowTargets } from "../../src/output/show.js";
 
 const QueryParams = Type.Object({
   query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
@@ -293,14 +295,7 @@ function formatInspectPacket(repo: string, symbol: string, relation: string, sco
     const isCallees = label.startsWith("trace-callees");
     const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
     sections.push(`## ${section}`);
-    const out = r.output.trim();
-    if (r.code !== 0) {
-      sections.push(`(command failed code=${r.code})`);
-    } else if (out) {
-      sections.push(out);
-    } else {
-      sections.push("(none)");
-    }
+    sections.push(...formatInspectCommandResult(r));
     sections.push("");
   }
   return sections.join("\n");
@@ -576,7 +571,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       const result = await executeSearch({
         query: params.query,
         repo: ctx.cwd,
-        scope: params.scope ?? ".",
+        scope: params.scope === undefined ? undefined : params.scope,
         maxResults: 3,
         detail: "normal",
         signal,
@@ -836,14 +831,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
             const isCallees = label.startsWith("trace-callees");
             const section = isContext ? "Context" : isCallers ? "Callers" : isCallees ? "Callees" : "References";
             sections.push(`## ${section}`);
-            const out = r.output.trim();
-            if (r.code !== 0) {
-              sections.push(`(command failed code=${r.code})`);
-            } else if (out) {
-              sections.push(out);
-            } else {
-              sections.push("(none)");
-            }
+            sections.push(...formatInspectCommandResult(r));
             sections.push("");
           }
         }
@@ -978,15 +966,19 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         import("../../src/output/truncate.js"),
       ]);
       // Resolve target from params
-      let target: string;
+      let targets: string[];
       let candidateInfo: string;
       let repo = ctx.cwd;
       const registryId = params.search_id ?? params.inspect_id;
 
       if (params.target) {
-        // Stateless: target provided directly
-        target = params.target;
-        candidateInfo = target;
+        // Stateless: direct targets may be a bounded comma-separated list.
+        const split = splitShowTargets(params.target);
+        if (split.error || !split.targets) {
+          return { content: [{ type: "text", text: `semantic_show: ${split.error ?? "invalid target."}` }] };
+        }
+        targets = split.targets;
+        candidateInfo = targets.join(",");
       } else if (registryId && params.candidate_id != null) {
         // Stateful: lookup from registry
         cleanupSearches();
@@ -1005,22 +997,24 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         if (!candidate) {
           return { content: [{ type: "text", text: `semantic_show: candidate_id ${params.candidate_id} out of range (1-${record.candidates.length}).` }] };
         }
-        target = candidate.target;
+        targets = [candidate.target];
         candidateInfo = `${candidate.target}${candidate.symbol ? ` ${candidate.symbol}` : ""}`;
       } else {
         return { content: [{ type: "text", text: "semantic_show: provide either (search_id/inspect_id + candidate_id) or target directly." }] };
       }
 
-      onUpdate?.({ content: [{ type: "text", text: `Running srcwalk show for ${target}...` }] });
+      onUpdate?.({ content: [{ type: "text", text: `Running srcwalk show for ${targets.join(", ")}...` }] });
 
-      const command: SrcwalkCommand = {
-        label: `show:${target}`,
-        args: ["srcwalk", "show", target, "-C", "12", "--budget", "5000"],
-        purpose: "show source code",
-        parseAs: "show",
+      const runShow = async (showTarget: string) => {
+        const command: SrcwalkCommand = {
+          label: `show:${showTarget}`,
+          args: ["srcwalk", "show", showTarget, "-C", "12", "--budget", "5000"],
+          purpose: "show source code",
+          parseAs: "show",
+        };
+        return { target: showTarget, result: await runCommand(repo, command, signal) };
       };
-
-      const result = await runCommand(repo, command, signal);
+      const results = await Promise.all(targets.map(runShow));
 
       const header = [
         `# semantic-show: ${candidateInfo}`,
@@ -1028,9 +1022,25 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         "",
       ].join("\n");
 
-      const packet = result.code === 0
-        ? header + result.output.trim()
-        : header + `(command failed code=${result.code})\n\n${result.output.trim()}`;
+      let packet: string;
+      if (results.length === 1) {
+        const result = results[0]!.result;
+        packet = result.code === 0
+          ? header + result.output.trim()
+          : header + `(command failed code=${result.code})\n\n${result.output.trim()}`;
+      } else {
+        const sections = results.map(({ target: showTarget, result }) => {
+          const status = showTargetStatus(showTarget, result.code, result.output);
+          return [
+            `## Target: ${showTarget}`,
+            `status: ${status}`,
+            "",
+            boundShowOutput(result.output) || "(no output)",
+            "",
+          ].join("\n");
+        });
+        packet = header + sections.join("\n");
+      }
 
       const truncated = await truncateForTool(packet);
 
