@@ -72,3 +72,4 @@ This story records the public-contract hardening for scope ownership, diagnostic
 - Smoke: explicit test-intent scope `src` remained `src` after reviewer regression fix ✅.
 - Reviewer: initial rework finding on test-intent scope override fixed; final validation rerun passed.
 - Follow-up guard: shared runtime-module preload is single-flight for concurrent cold calls and resets after a failed preload; `npm test` now passes 33/33.
+- Post-reload live smoke: two `semantic_query` calls, one `semantic_inspect`, and one multi-target `semantic_show` launched concurrently; all four completed successfully with no module import errors ✅.
