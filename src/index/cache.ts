@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { LexicalIndex } from "../domain/types.js";
-import { iterFilesDetailed, type IterFilesResult } from "./files.js";
+import { iterFilesDetailed, maxBm25WalkEntries, type IterFilesResult } from "./files.js";
 import { tokenize } from "./tokenize.js";
 import { runSingleFlight, runWithRepoBuildQueue } from "../cache/build-coordinator.js";
 
@@ -37,8 +37,16 @@ export function cacheRoot(): string {
   return "memory";
 }
 
+function budgetSignature(): string {
+  return [
+    `indexedFiles=${maxBm25IndexedFiles()}`,
+    `indexBytes=${maxBm25IndexBytes()}`,
+    `walkEntries=${maxBm25WalkEntries()}`,
+  ].join(";");
+}
+
 function cacheKey(repo: string, scope: string): string {
-  return createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${CACHE_VERSION}`).digest("hex").slice(0, 20);
+  return createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${CACHE_VERSION}\n${budgetSignature()}`).digest("hex").slice(0, 20);
 }
 
 async function fingerprintFiles(repo: string, scope: string, key: string, allowCached: boolean): Promise<{ fingerprint: string; fileSet: IterFilesResult }> {
@@ -105,15 +113,13 @@ function estimateIndexSize(index: LexicalIndex): number {
   return bytes;
 }
 
-function pruneMemoryCache(protectedKey: string): void {
+function pruneMemoryCache(): void {
   const maxEntries = maxMemoryEntries();
   const maxBytes = maxMemoryBytes();
   let totalBytes = [...memoryCache.values()].reduce((sum, entry) => sum + entry.sizeBytes, 0);
 
   while (memoryCache.size > maxEntries || totalBytes > maxBytes) {
-    const evictable = [...memoryCache.entries()]
-      .filter(([key]) => key !== protectedKey || memoryCache.size > 1)
-      .sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
+    const evictable = [...memoryCache.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
     if (!evictable) break;
     memoryCache.delete(evictable[0]);
     fingerprintCache.delete(evictable[0]);
@@ -125,6 +131,7 @@ function touchMemoryEntry(key: string, entry: MemoryEntry): void {
   entry.lastAccess = Date.now();
   memoryCache.delete(key);
   memoryCache.set(key, entry);
+  pruneMemoryCache();
 }
 
 function pathIdFor(paths: string[], pathIds: Map<string, number>, rel: string): number {
@@ -340,7 +347,7 @@ async function buildOrLoadIndexUncoordinated(repo: string, scope: string, key: s
   if (index.stats.sizeBytes <= maxMemoryBytes()) {
     const entry: MemoryEntry = { fingerprint, index, lastAccess: Date.now(), sizeBytes: index.stats.sizeBytes };
     memoryCache.set(key, entry);
-    pruneMemoryCache(key);
+    pruneMemoryCache();
   } else {
     index.stats.cacheLocation = `uncached:${key}`;
     index.stats.notes = [...(index.stats.notes ?? []), `BM25 index estimate ${(index.stats.sizeBytes / (1024 * 1024)).toFixed(2)}MB exceeded retained cache budget; result was not cached`];

@@ -6,6 +6,9 @@ import {
   canonicalScopeDisplays,
   collectCandidateFiles,
   normalizeScopesInput,
+  maxIndexedBytes,
+  maxIndexedFiles,
+  maxWalkEntries,
   resolveAndPruneScopes,
   type PrunedScopes,
 } from "./semantic-grep-scopes.js";
@@ -134,8 +137,16 @@ function displayPathForMatch(repo: string, absFile: string): string {
   return rel.split(path.sep).join("/");
 }
 
+function budgetSignature(): string {
+  return [
+    `indexedFiles=${maxIndexedFiles()}`,
+    `indexBytes=${maxIndexedBytes()}`,
+    `walkEntries=${maxWalkEntries()}`,
+  ].join(";");
+}
+
 function cacheKey(repo: string, scopeKeys: string[], glob?: string): string {
-  const payload = `${path.resolve(repo)}\n${scopeKeys.join("\n")}\n${glob ?? ""}\nsemantic-grep-v2`;
+  const payload = `${path.resolve(repo)}\n${scopeKeys.join("\n")}\n${glob ?? ""}\nsemantic-grep-v2\n${budgetSignature()}`;
   return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 20);
 }
 

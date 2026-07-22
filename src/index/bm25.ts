@@ -204,7 +204,9 @@ async function streamingBm25(repo: string, scope: string, queryTokens: string[],
   return {
     final: topHeap.sort((a, b) => b.score - a.score || a.order - b.order).map((entry) => entry.item),
     notes: [
-      `TS BM25 streaming mode scanned ${fileSet.files.length} files / ${chunks} chunks with full discovered-file coverage; PRF disabled to stay memory bounded.`,
+      fileSet.walkCapped
+        ? `TS BM25 streaming mode scanned ${fileSet.files.length} discovered files / ${chunks} chunks with incomplete coverage because the walk cap was reached; PRF disabled to stay memory bounded.`
+        : `TS BM25 streaming mode scanned ${fileSet.files.length} files / ${chunks} chunks with full discovered-file coverage; PRF disabled to stay memory bounded.`,
       ...fileSet.notes,
     ],
     files: fileSet.files.length,

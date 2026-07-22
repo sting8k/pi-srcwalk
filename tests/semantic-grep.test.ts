@@ -269,3 +269,29 @@ test("semantic_grep does not retain an index that exceeds the grep cache byte bu
     else process.env.PI_SRCWALK_GREP_CACHE_MAX_MB = previous;
   }
 });
+
+test("semantic_grep cached index is bypassed when acceleration budgets are lowered", async () => {
+  const previous = process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES;
+  const repo = await fixtureRepo({
+    "src/a.ts": "CACHE-A first\n",
+    "src/b.ts": "CACHE-B second\n",
+  });
+  try {
+    process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES = "10";
+    const first = await executeSemanticGrep({ repo, scopes: ["."], pattern: "CACHE-B", literal: true });
+    assert.equal(first.stats.cacheHit, false);
+    assert.equal(first.stats.indexedFiles, 2);
+    assert.equal(first.stats.candidateFiles, 1);
+
+    process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES = "1";
+    const second = await executeSemanticGrep({ repo, scopes: ["."], pattern: "CACHE-B", literal: true });
+    assert.equal(second.stats.cacheHit, false);
+    assert.equal(second.stats.indexedFiles, 1);
+    assert.equal(second.stats.candidateFiles, 1);
+    assert.deepEqual(second.matches.map((match) => `${match.path}:${match.line}`), ["src/b.ts:1"]);
+    assert.match(second.notes.join("\n"), /stream-verified 1 overflow files/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES;
+    else process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES = previous;
+  }
+});
