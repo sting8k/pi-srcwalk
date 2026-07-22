@@ -9,10 +9,10 @@ const SKIP_DIRS = new Set([
 ]);
 const SKIP_FILENAMES = new Set(["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "composer.lock", "poetry.lock", "Pipfile.lock", "harness.db"]);
 export const MAX_SCOPES = 32;
-export const MAX_INDEXED_FILES = 10_000;
-export const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_MAX_INDEXED_FILES = 10_000;
+export const DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 export const MAX_FILE_BYTES = 512_000;
-export const MAX_WALK_ENTRIES = 100_000;
+export const DEFAULT_MAX_WALK_ENTRIES = 100_000;
 
 export interface ResolvedScopeEntry {
   requested: string;
@@ -27,6 +27,34 @@ export interface PrunedScopes {
   files: ResolvedScopeEntry[];
   canonicalKeys: string[];
   notes: string[];
+}
+
+export interface CollectedGrepFiles {
+  files: string[];
+  overflowFiles: string[];
+  notes: string[];
+  eligibleFiles: number;
+  indexedBytes: number;
+  overflowBytes: number;
+  visitedEntries: number;
+  walkCapped: boolean;
+}
+
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+export function maxIndexedFiles(): number {
+  return positiveIntEnv("PI_SRCWALK_GREP_MAX_INDEXED_FILES", DEFAULT_MAX_INDEXED_FILES);
+}
+
+export function maxIndexedBytes(): number {
+  return positiveIntEnv("PI_SRCWALK_GREP_MAX_INDEX_MB", Math.floor(DEFAULT_MAX_TOTAL_BYTES / (1024 * 1024))) * 1024 * 1024;
+}
+
+export function maxWalkEntries(): number {
+  return positiveIntEnv("PI_SRCWALK_GREP_MAX_WALK_ENTRIES", DEFAULT_MAX_WALK_ENTRIES);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -177,16 +205,28 @@ export async function collectCandidateFiles(
   matchesGlob: (rel: string, glob?: string) => boolean,
   normalizeRel: (repo: string, file: string) => string,
   signal?: AbortSignal,
-): Promise<{ files: string[]; notes: string[] }> {
+): Promise<CollectedGrepFiles> {
   const notes: string[] = [];
-  const byReal = new Map<string, string>();
-  let totalBytes = 0;
+  const indexedByReal = new Map<string, string>();
+  const overflowByReal = new Map<string, string>();
+  let indexedBytes = 0;
+  let overflowBytes = 0;
+  let eligibleFiles = 0;
   let visitedEntries = 0;
   let walkCapped = false;
+  let overflowNoted = false;
+  const indexedFileCap = maxIndexedFiles();
+  const indexedByteCap = maxIndexedBytes();
+  const walkCap = maxWalkEntries();
+
+  function noteOverflow(reason: string): void {
+    if (!overflowNoted) notes.push(`${reason}; remaining eligible files will be stream-verified`);
+    overflowNoted = true;
+  }
 
   function onEntry(): boolean {
-    if (visitedEntries >= MAX_WALK_ENTRIES) {
-      if (!walkCapped) notes.push(`walk entry cap reached (${MAX_WALK_ENTRIES}); remaining paths skipped`);
+    if (visitedEntries >= walkCap) {
+      if (!walkCapped) notes.push(`walk entry cap reached (${walkCap}); remaining paths skipped; coverage is incomplete`);
       walkCapped = true;
       return false;
     }
@@ -197,38 +237,52 @@ export async function collectCandidateFiles(
   async function addFile(file: string, size: number): Promise<boolean> {
     throwIfAborted(signal);
     const real = await tryReal(file);
-    if (byReal.has(real)) return true;
+    if (indexedByReal.has(real) || overflowByReal.has(real)) return true;
     if (!matchesGlob(normalizeRel(repo, file), glob)) return true;
-    if (byReal.size >= MAX_INDEXED_FILES) {
-      notes.push(`indexed file cap reached (${MAX_INDEXED_FILES}); remaining files skipped`);
-      return false;
+    eligibleFiles += 1;
+    if (indexedByReal.size >= indexedFileCap) {
+      overflowByReal.set(real, file);
+      overflowBytes += size;
+      noteOverflow(`indexed file cap reached (${indexedFileCap})`);
+      return true;
     }
-    if (totalBytes + size > MAX_TOTAL_BYTES) {
-      notes.push(`indexed byte cap reached (${MAX_TOTAL_BYTES} bytes); remaining files skipped`);
-      return false;
+    if (indexedBytes + size > indexedByteCap) {
+      overflowByReal.set(real, file);
+      overflowBytes += size;
+      noteOverflow(`indexed byte cap reached (${indexedByteCap} bytes)`);
+      return true;
     }
-    byReal.set(real, file);
-    totalBytes += size;
+    indexedByReal.set(real, file);
+    indexedBytes += size;
     return true;
   }
 
   for (const dir of pruned.dirs) {
     throwIfAborted(signal);
-    if (!(await walkDir(repo, dir.resolved, signal, addFile, onEntry))) return { files: [...byReal.values()].sort(), notes };
+    if (!(await walkDir(repo, dir.resolved, signal, addFile, onEntry))) break;
   }
 
-  for (const fileEntry of pruned.files) {
-    throwIfAborted(signal);
-    if (!(await filePasses(fileEntry.resolved))) continue;
-    const real = fileEntry.real;
-    if (byReal.has(real)) continue;
-    if (!matchesGlob(normalizeRel(repo, fileEntry.resolved), glob)) continue;
-    const s = await stat(fileEntry.resolved).catch(() => undefined);
-    if (!s) continue;
-    if (!(await addFile(fileEntry.resolved, s.size))) break;
+  if (!walkCapped) {
+    for (const fileEntry of pruned.files) {
+      throwIfAborted(signal);
+      if (!(await filePasses(fileEntry.resolved))) continue;
+      if (!matchesGlob(normalizeRel(repo, fileEntry.resolved), glob)) continue;
+      const s = await stat(fileEntry.resolved).catch(() => undefined);
+      if (!s) continue;
+      await addFile(fileEntry.resolved, s.size);
+    }
   }
 
-  return { files: [...byReal.values()].sort(), notes };
+  return {
+    files: [...indexedByReal.values()].sort(),
+    overflowFiles: [...overflowByReal.values()].sort(),
+    notes,
+    eligibleFiles,
+    indexedBytes,
+    overflowBytes,
+    visitedEntries,
+    walkCapped,
+  };
 }
 
 export function canonicalScopeDisplays(pruned: PrunedScopes): string[] {

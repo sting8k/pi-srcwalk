@@ -277,14 +277,22 @@ semantic_query process
    └─ typed-array doc terms for PRF
 ```
 
-The cache does not write chunk/index files to `/tmp`. It rebuilds when file fingerprints change and is bounded with LRU eviction:
+The cache does not write chunk/index files to `/tmp`. It rebuilds when file fingerprints change and is bounded with LRU eviction. For oversized scopes, `semantic_query` falls back to full-coverage streaming BM25 and disables PRF for that query instead of building an unsafe index.
 
 | Env | Default | Purpose |
 |---|---:|---|
-| `PI_SRCWALK_MEMORY_CACHE_ENTRIES` | `4` | maximum cached repo/scope indexes per process |
-| `PI_SRCWALK_MEMORY_CACHE_MAX_MB` | `512` | approximate memory budget before LRU eviction |
+| `PI_SRCWALK_MEMORY_CACHE_ENTRIES` | `4` | maximum cached repo/scope BM25 indexes per process |
+| `PI_SRCWALK_MEMORY_CACHE_MAX_MB` | `512` | approximate retained BM25 cache budget before LRU eviction |
+| `PI_SRCWALK_BM25_MAX_INDEXED_FILES` | `10000` | maximum files for in-memory BM25 acceleration before streaming fallback |
+| `PI_SRCWALK_BM25_MAX_INDEX_MB` | `25` | maximum source bytes for in-memory BM25 acceleration before streaming fallback |
+| `PI_SRCWALK_BM25_MAX_WALK_ENTRIES` | `100000` | maximum directory entries visited before coverage is reported incomplete |
+| `PI_SRCWALK_GREP_CACHE_ENTRIES` | `4` | maximum cached `semantic_grep` indexes per process |
+| `PI_SRCWALK_GREP_CACHE_MAX_MB` | `256` | approximate retained `semantic_grep` cache budget before LRU eviction |
+| `PI_SRCWALK_GREP_MAX_INDEXED_FILES` | `10000` | maximum files included in grep trigram acceleration before overflow streaming |
+| `PI_SRCWALK_GREP_MAX_INDEX_MB` | `50` | maximum source bytes included in grep trigram acceleration before overflow streaming |
+| `PI_SRCWALK_GREP_MAX_WALK_ENTRIES` | `100000` | maximum grep walk entries before coverage is reported incomplete |
 
-The retained memory index avoids full chunk text and duplicated token strings; it keeps only chunk metadata, short previews, vocabulary strings, and typed arrays. No database, no native dependencies.
+The retained BM25 index avoids full chunk text and duplicated token strings; it keeps only chunk metadata, short previews, vocabulary strings, and typed arrays. `semantic_grep` may index only the acceleration-budgeted files, but it stream-verifies overflow files so completed searches preserve exact coverage. No database, no native dependencies.
 
 ---
 

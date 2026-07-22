@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { LexicalIndex } from "../domain/types.js";
-import { iterFiles } from "./files.js";
+import { iterFilesDetailed, type IterFilesResult } from "./files.js";
 import { tokenize } from "./tokenize.js";
 import { runSingleFlight, runWithRepoBuildQueue } from "../cache/build-coordinator.js";
 
@@ -12,6 +12,8 @@ const CHUNK_OVERLAP = 10;
 const PREVIEW_CHARS = 180;
 const DEFAULT_MAX_MEMORY_CACHE_ENTRIES = 4;
 const DEFAULT_MAX_MEMORY_CACHE_MB = 512;
+const DEFAULT_MAX_INDEXED_FILES = 10_000;
+const DEFAULT_MAX_INDEX_MB = 25;
 const FINGERPRINT_TTL_MS = 1_000;
 
 interface MemoryEntry {
@@ -23,7 +25,7 @@ interface MemoryEntry {
 
 interface FingerprintEntry {
   fingerprint: string;
-  files: string[];
+  fileSet: IterFilesResult;
   cachedAt: number;
 }
 
@@ -39,20 +41,20 @@ function cacheKey(repo: string, scope: string): string {
   return createHash("sha256").update(`${path.resolve(repo)}\n${scope}\n${CACHE_VERSION}`).digest("hex").slice(0, 20);
 }
 
-async function fingerprintFiles(repo: string, scope: string, key: string, allowCached: boolean): Promise<{ fingerprint: string; files: string[] }> {
+async function fingerprintFiles(repo: string, scope: string, key: string, allowCached: boolean): Promise<{ fingerprint: string; fileSet: IterFilesResult }> {
   const now = Date.now();
   const cached = fingerprintCache.get(key);
-  if (allowCached && cached && now - cached.cachedAt <= FINGERPRINT_TTL_MS) return { fingerprint: cached.fingerprint, files: cached.files };
+  if (allowCached && cached && now - cached.cachedAt <= FINGERPRINT_TTL_MS) return { fingerprint: cached.fingerprint, fileSet: cached.fileSet };
 
-  const files = await iterFiles(repo, scope);
+  const fileSet = await iterFilesDetailed(repo, scope);
   const h = createHash("sha256");
-  for (const file of files) {
+  for (const file of fileSet.files) {
     const s = await stat(file).catch(() => undefined);
     if (!s) continue;
     const rel = path.relative(repo, file).split(path.sep).join("/");
     h.update(rel).update("\0").update(String(s.size)).update("\0").update(String(s.mtimeMs)).update("\n");
   }
-  const result = { fingerprint: h.digest("hex"), files };
+  const result = { fingerprint: h.digest("hex"), fileSet };
   fingerprintCache.set(key, { ...result, cachedAt: Date.now() });
   return result;
 }
@@ -68,6 +70,22 @@ function maxMemoryEntries(): number {
 
 function maxMemoryBytes(): number {
   return positiveIntEnv("PI_SRCWALK_MEMORY_CACHE_MAX_MB", DEFAULT_MAX_MEMORY_CACHE_MB) * 1024 * 1024;
+}
+
+export function maxBm25IndexedFiles(): number {
+  return positiveIntEnv("PI_SRCWALK_BM25_MAX_INDEXED_FILES", DEFAULT_MAX_INDEXED_FILES);
+}
+
+export function maxBm25IndexBytes(): number {
+  return positiveIntEnv("PI_SRCWALK_BM25_MAX_INDEX_MB", DEFAULT_MAX_INDEX_MB) * 1024 * 1024;
+}
+
+export function shouldUseStreamingBm25(fileSet: IterFilesResult): boolean {
+  return fileSet.walkCapped || fileSet.files.length > maxBm25IndexedFiles() || fileSet.totalBytes > maxBm25IndexBytes();
+}
+
+export async function collectBm25Files(repo: string, scope: string, signal?: AbortSignal): Promise<IterFilesResult> {
+  return iterFilesDetailed(path.resolve(repo), scope, signal);
 }
 
 function stringBytes(value: string): number {
@@ -168,6 +186,44 @@ function buildDocTerms(offsetsRaw: number[], termIdsRaw: number[], freqsRaw: num
   };
 }
 
+function streamingMarkerIndex(location: string, fingerprint: string, fileSet: IterFilesResult, buildMs: number): LexicalIndex {
+  const notes = [
+    `BM25 index acceleration budget exceeded; using streaming retrieval for ${fileSet.files.length} discovered files`,
+    ...fileSet.notes,
+  ];
+  return {
+    chunkCount: 0,
+    paths: [],
+    chunkPathIds: new Uint32Array(),
+    chunkStarts: new Uint32Array(),
+    chunkEnds: new Uint32Array(),
+    chunkPreviews: [],
+    vocab: [],
+    termIds: new Map<string, number>(),
+    docFreq: new Uint32Array(),
+    docLens: new Uint32Array(),
+    postings: { offsets: new Uint32Array(), docs: new Uint32Array(), freqs: new Uint16Array() },
+    docTerms: { offsets: new Uint32Array(), termIds: new Uint32Array(), freqs: new Uint16Array() },
+    avgdl: 0,
+    stats: {
+      cacheKind: "memory",
+      cacheLocation: `streaming:${location}`,
+      cacheHit: false,
+      chunks: 0,
+      files: fileSet.files.length,
+      fingerprint,
+      buildMs,
+      queryMs: 0,
+      sizeBytes: 0,
+      retrievalMode: "streaming",
+      coverageCapped: fileSet.walkCapped,
+      eligibleFiles: fileSet.files.length,
+      totalBytes: fileSet.totalBytes,
+      notes,
+    },
+  };
+}
+
 export async function buildOrLoadIndex(repoInput: string, scope: string): Promise<LexicalIndex> {
   const repo = path.resolve(repoInput);
   const key = cacheKey(repo, scope);
@@ -178,13 +234,16 @@ async function buildOrLoadIndexUncoordinated(repo: string, scope: string, key: s
   const started = performance.now();
   const location = `memory:${key}`;
   const cached = memoryCache.get(key);
-  const { fingerprint, files } = await fingerprintFiles(repo, scope, key, Boolean(cached));
+  const { fingerprint, fileSet } = await fingerprintFiles(repo, scope, key, Boolean(cached));
+  const files = fileSet.files;
   if (cached?.fingerprint === fingerprint) {
     touchMemoryEntry(key, cached);
     const buildMs = Math.round(performance.now() - started);
     cached.index.stats = { ...cached.index.stats, cacheHit: true, files: files.length, fingerprint, buildMs, queryMs: 0 };
     return cached.index;
   }
+  if (cached) memoryCache.delete(key);
+  if (shouldUseStreamingBm25(fileSet)) return streamingMarkerIndex(key, fingerprint, fileSet, Math.round(performance.now() - started));
 
   const paths: string[] = [];
   const pathIds = new Map<string, number>();
@@ -269,12 +328,22 @@ async function buildOrLoadIndexUncoordinated(repo: string, scope: string, key: s
       buildMs,
       queryMs: 0,
       sizeBytes: 0,
+      retrievalMode: "indexed",
+      coverageCapped: fileSet.walkCapped,
+      eligibleFiles: files.length,
+      totalBytes: fileSet.totalBytes,
+      notes: fileSet.notes,
     },
   };
   index.stats.sizeBytes = estimateIndexSize(index);
 
-  const entry: MemoryEntry = { fingerprint, index, lastAccess: Date.now(), sizeBytes: index.stats.sizeBytes };
-  memoryCache.set(key, entry);
-  pruneMemoryCache(key);
+  if (index.stats.sizeBytes <= maxMemoryBytes()) {
+    const entry: MemoryEntry = { fingerprint, index, lastAccess: Date.now(), sizeBytes: index.stats.sizeBytes };
+    memoryCache.set(key, entry);
+    pruneMemoryCache(key);
+  } else {
+    index.stats.cacheLocation = `uncached:${key}`;
+    index.stats.notes = [...(index.stats.notes ?? []), `BM25 index estimate ${(index.stats.sizeBytes / (1024 * 1024)).toFixed(2)}MB exceeded retained cache budget; result was not cached`];
+  }
   return index;
 }

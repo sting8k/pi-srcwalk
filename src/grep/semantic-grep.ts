@@ -96,7 +96,6 @@ export interface SemanticGrepInspectEnrichment {
 interface IndexedFile {
   rel: string;
   displayPath: string;
-  text: string;
   lines: string[];
 }
 
@@ -107,6 +106,9 @@ interface GrepIndex {
   glob?: string;
   fingerprint: string;
   files: IndexedFile[];
+  overflowFiles: string[];
+  eligibleFiles: number;
+  walkCapped: boolean;
   postings: Map<string, Set<number>>;
   sizeBytes: number;
   cacheLocation: string;
@@ -117,7 +119,8 @@ type GrepBuildResult = { index: GrepIndex; cacheHit: boolean; buildMs: number };
 const MAX_CONTEXT_LINES = 5;
 const DEFAULT_MAX_RESULTS = 100;
 const MAX_MAX_RESULTS = 500;
-const MAX_CACHE_ENTRIES = 4;
+const DEFAULT_CACHE_ENTRIES = 4;
+const DEFAULT_CACHE_MB = 256;
 const grepCache = new Map<string, GrepIndex>();
 const grepBuilds = new Map<string, AbortableFlight<GrepBuildResult>>();
 
@@ -205,14 +208,66 @@ function addPostings(postings: Map<string, Set<number>>, text: string, fileId: n
   }
 }
 
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+function maxCacheEntries(): number {
+  return positiveIntEnv("PI_SRCWALK_GREP_CACHE_ENTRIES", DEFAULT_CACHE_ENTRIES);
+}
+
+function maxCacheBytes(): number {
+  return positiveIntEnv("PI_SRCWALK_GREP_CACHE_MAX_MB", DEFAULT_CACHE_MB) * 1024 * 1024;
+}
+
+function stringBytes(value: string): number {
+  return value.length * 2;
+}
+
+function estimateIndexedFileSize(file: IndexedFile): number {
+  return stringBytes(file.rel) + stringBytes(file.displayPath) + file.lines.reduce((sum, line) => sum + stringBytes(line) + 32, 0) + file.lines.length * 8;
+}
+
+function estimatePostingsSize(postings: Map<string, Set<number>>): number {
+  let bytes = 0;
+  for (const [gram, ids] of postings) bytes += stringBytes(gram) + 96 + ids.size * 16;
+  return bytes;
+}
+
+function estimateIndexSize(files: IndexedFile[], overflowFiles: string[], postings: Map<string, Set<number>>): number {
+  return files.reduce((sum, file) => sum + estimateIndexedFileSize(file), 0) + overflowFiles.reduce((sum, file) => sum + stringBytes(file) + 64, 0) + estimatePostingsSize(postings);
+}
+
+function pruneCache(): void {
+  const maxEntries = maxCacheEntries();
+  const maxBytes = maxCacheBytes();
+  let totalBytes = [...grepCache.values()].reduce((sum, entry) => sum + entry.sizeBytes, 0);
+  while (grepCache.size > maxEntries || totalBytes > maxBytes) {
+    const oldest = grepCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    const evicted = grepCache.get(oldest);
+    grepCache.delete(oldest);
+    totalBytes -= evicted?.sizeBytes ?? 0;
+  }
+}
+
+function admitCache(key: string, index: GrepIndex): void {
+  if (index.sizeBytes > maxCacheBytes()) {
+    grepCache.delete(key);
+    index.cacheLocation = `uncached:${key}`;
+    return;
+  }
+  grepCache.delete(key);
+  index.cacheLocation = `memory:${key}`;
+  grepCache.set(key, index);
+  pruneCache();
+}
+
 function touchCache(key: string, index: GrepIndex): void {
   grepCache.delete(key);
   grepCache.set(key, index);
-  while (grepCache.size > MAX_CACHE_ENTRIES) {
-    const oldest = grepCache.keys().next().value as string | undefined;
-    if (!oldest) break;
-    grepCache.delete(oldest);
-  }
+  pruneCache();
 }
 
 async function buildOrLoadGrepIndex(repo: string, pruned: PrunedScopes, glob: string | undefined, signal?: AbortSignal): Promise<GrepBuildResult> {
@@ -232,19 +287,20 @@ async function buildOrLoadGrepIndexUncoordinated(
 ): Promise<GrepBuildResult> {
   const started = performance.now();
   if (signal.aborted) throw new Error("semantic_grep aborted");
-  const { files, notes: indexNotes } = await collectCandidateFiles(repo, pruned, glob, matchesGlob, normalizeRel, signal);
+  const collected = await collectCandidateFiles(repo, pruned, glob, matchesGlob, normalizeRel, signal);
+  const { files, overflowFiles, notes: indexNotes } = collected;
   if (signal.aborted) throw new Error("semantic_grep aborted");
-  const fingerprint = await fingerprintFiles(repo, files, signal);
+  const fingerprint = await fingerprintFiles(repo, [...files, ...overflowFiles], signal);
   if (signal.aborted) throw new Error("semantic_grep aborted");
   const cached = grepCache.get(key);
   if (cached?.fingerprint === fingerprint) {
     touchCache(key, cached);
     return { index: cached, cacheHit: true, buildMs: Math.round(performance.now() - started) };
   }
+  if (cached) grepCache.delete(key);
 
   const indexedFiles: IndexedFile[] = [];
   const postings = new Map<string, Set<number>>();
-  let sizeBytes = 0;
   for (const file of files) {
     if (signal.aborted) throw new Error("semantic_grep aborted");
     const text = await readFile(file, "utf8").catch(() => undefined);
@@ -252,13 +308,14 @@ async function buildOrLoadGrepIndexUncoordinated(
     const rel = normalizeRel(repo, file);
     const displayPath = displayPathForMatch(repo, file);
     const id = indexedFiles.length;
-    indexedFiles.push({ rel, displayPath, text, lines: text.split(/\r?\n/) });
-    sizeBytes += Buffer.byteLength(text, "utf8") + rel.length;
+    const lines = text.split(/\r?\n/);
+    indexedFiles.push({ rel, displayPath, lines });
     addPostings(postings, text, id);
     addPostings(postings, rel, id);
     addPostings(postings, displayPath, id);
   }
 
+  const sizeBytes = estimateIndexSize(indexedFiles, overflowFiles, postings);
   const index: GrepIndex = {
     repo,
     scopeKeys: pruned.canonicalKeys,
@@ -266,11 +323,14 @@ async function buildOrLoadGrepIndexUncoordinated(
     glob,
     fingerprint,
     files: indexedFiles,
+    overflowFiles,
+    eligibleFiles: collected.eligibleFiles,
+    walkCapped: collected.walkCapped,
     postings,
     sizeBytes,
     cacheLocation: `memory:${key}`,
   };
-  touchCache(key, index);
+  admitCache(key, index);
   return { index, cacheHit: false, buildMs: Math.round(performance.now() - started) };
 }
 
@@ -380,6 +440,40 @@ function contextAfter(lines: string[], idx: number, count: number): Array<{ line
   return out;
 }
 
+function collectLineMatches(
+  displayPath: string,
+  lines: string[],
+  pattern: string,
+  literal: boolean,
+  ignoreCase: boolean,
+  regex: RegExp | undefined,
+  context: number,
+  maxResults: number,
+  matches: SemanticGrepMatch[],
+): { totalMatches: number; matched: boolean; truncated: boolean } {
+  let totalMatches = 0;
+  let matched = false;
+  let truncated = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (!lineMatches(line, pattern, literal, ignoreCase, regex)) continue;
+    totalMatches += 1;
+    matched = true;
+    if (matches.length < maxResults) {
+      matches.push({
+        path: displayPath,
+        line: i + 1,
+        text: line,
+        before: contextBefore(lines, i, context),
+        after: contextAfter(lines, i, context),
+      });
+    } else {
+      truncated = true;
+    }
+  }
+  return { totalMatches, matched, truncated };
+}
+
 function isRepoRelativeGrepPath(matchPath: string): boolean {
   return Boolean(matchPath) && !path.isAbsolute(matchPath) && !matchPath.startsWith("../") && matchPath !== "..";
 }
@@ -434,6 +528,9 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
   for (const note of index.indexNotes) {
     if (!notes.includes(note)) notes.push(note);
   }
+  if (index.overflowFiles.length) notes.push(`stream-verified ${index.overflowFiles.length} overflow files outside the trigram acceleration budget`);
+  if (index.walkCapped) notes.push("coverage is incomplete because the walk entry cap was reached");
+  if (index.cacheLocation.startsWith("uncached:")) notes.push("grep index exceeded cache byte budget and was not retained");
   if (options.signal?.aborted) throw new Error("semantic_grep aborted");
   const anchorPlan = anchorsFor(pattern, literal);
   const backend: SemanticGrepBackend = anchorPlan.canPrune ? "trigram-index" : "full-scan";
@@ -485,25 +582,23 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
     const file = index.files[fileId];
     if (!file) continue;
     searchedFiles += 1;
-    let fileMatched = false;
-    for (let i = 0; i < file.lines.length; i += 1) {
-      const line = file.lines[i] ?? "";
-      if (!lineMatches(line, pattern, literal, ignoreCase, regex)) continue;
-      totalMatches += 1;
-      fileMatched = true;
-      if (matches.length < maxResults) {
-        matches.push({
-          path: file.displayPath,
-          line: i + 1,
-          text: line,
-          before: contextBefore(file.lines, i, context),
-          after: contextAfter(file.lines, i, context),
-        });
-      } else {
-        truncated = true;
-      }
-    }
-    if (fileMatched) matchedFiles.add(file.displayPath);
+    const found = collectLineMatches(file.displayPath, file.lines, pattern, literal, ignoreCase, regex, context, maxResults, matches);
+    totalMatches += found.totalMatches;
+    truncated ||= found.truncated;
+    if (found.matched) matchedFiles.add(file.displayPath);
+  }
+
+  for (const filePath of index.overflowFiles) {
+    if (options.signal?.aborted) throw new Error("semantic_grep aborted");
+    const text = await readFile(filePath, "utf8").catch(() => undefined);
+    if (text === undefined) continue;
+    searchedFiles += 1;
+    const displayPath = displayPathForMatch(repo, filePath);
+    const lines = text.split(/\r?\n/);
+    const found = collectLineMatches(displayPath, lines, pattern, literal, ignoreCase, regex, context, maxResults, matches);
+    totalMatches += found.totalMatches;
+    truncated ||= found.truncated;
+    if (found.matched) matchedFiles.add(displayPath);
   }
 
   return {
@@ -520,7 +615,7 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
     stats: {
       cacheHit,
       indexedFiles: index.files.length,
-      candidateFiles: candidateIds.length,
+      candidateFiles: candidateIds.length + index.overflowFiles.length,
       searchedFiles,
       matchedFiles: matchedFiles.size,
       totalMatches,
