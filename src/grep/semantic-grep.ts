@@ -15,6 +15,17 @@ import {
 import { runAbortableSingleFlight, runWithRepoBuildQueue, type AbortableFlight } from "../cache/build-coordinator.js";
 
 export type SemanticGrepBackend = "trigram-index" | "full-scan" | "invalid-regex";
+export type SemanticGrepCoverageStatus = "complete" | "incomplete" | "unknown";
+
+export interface SemanticGrepCoverage {
+  status: SemanticGrepCoverageStatus;
+  reason?: string;
+  indexedFiles: number;
+  overflowFiles: number;
+  searchedFiles: number;
+  eligibleFiles: number;
+  readFailures: number;
+}
 
 export interface ExecuteSemanticGrepOptions {
   pattern: string;
@@ -55,12 +66,15 @@ export interface SemanticGrepResult {
     searchedFiles: number;
     matchedFiles: number;
     totalMatches: number;
+    shownMatches: number;
+    matchTruncated: boolean;
     truncated: boolean;
     buildMs: number;
     queryMs: number;
     sizeBytes: number;
     cacheLocation: string;
   };
+  coverage: SemanticGrepCoverage;
   error?: string;
 }
 
@@ -112,12 +126,28 @@ interface GrepIndex {
   overflowFiles: string[];
   eligibleFiles: number;
   walkCapped: boolean;
+  readFailures: number;
   postings: Map<string, Set<number>>;
   sizeBytes: number;
   cacheLocation: string;
 }
 
 type GrepBuildResult = { index: GrepIndex; cacheHit: boolean; buildMs: number };
+
+function coverageForIndex(index: GrepIndex, searchedFiles: number, queryReadFailures = 0, unknownReason?: string): SemanticGrepCoverage {
+  const readFailures = index.readFailures + queryReadFailures;
+  const base = {
+    indexedFiles: index.files.length,
+    overflowFiles: index.overflowFiles.length,
+    searchedFiles,
+    eligibleFiles: index.eligibleFiles,
+    readFailures,
+  };
+  if (unknownReason) return { status: "unknown", reason: unknownReason, ...base };
+  if (index.walkCapped) return { status: "incomplete", reason: "walk entry cap reached", ...base };
+  if (readFailures > 0) return { status: "incomplete", reason: `${readFailures} eligible file(s) could not be read`, ...base };
+  return { status: "complete", ...base };
+}
 
 const MAX_CONTEXT_LINES = 5;
 const DEFAULT_MAX_RESULTS = 100;
@@ -311,11 +341,15 @@ async function buildOrLoadGrepIndexUncoordinated(
   if (cached) grepCache.delete(key);
 
   const indexedFiles: IndexedFile[] = [];
+  let readFailures = 0;
   const postings = new Map<string, Set<number>>();
   for (const file of files) {
     if (signal.aborted) throw new Error("semantic_grep aborted");
     const text = await readFile(file, "utf8").catch(() => undefined);
-    if (text === undefined) continue;
+    if (text === undefined) {
+      readFailures += 1;
+      continue;
+    }
     const rel = normalizeRel(repo, file);
     const displayPath = displayPathForMatch(repo, file);
     const id = indexedFiles.length;
@@ -337,6 +371,7 @@ async function buildOrLoadGrepIndexUncoordinated(
     overflowFiles,
     eligibleFiles: collected.eligibleFiles,
     walkCapped: collected.walkCapped,
+    readFailures,
     postings,
     sizeBytes,
     cacheLocation: `memory:${key}`,
@@ -571,12 +606,15 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
           searchedFiles: 0,
           matchedFiles: 0,
           totalMatches: 0,
+          shownMatches: 0,
+          matchTruncated: false,
           truncated: false,
           buildMs,
           queryMs: Math.round(performance.now() - queryStarted),
           sizeBytes: index.sizeBytes,
           cacheLocation: index.cacheLocation,
         },
+        coverage: coverageForIndex(index, 0, 0, "invalid regex"),
       };
     }
   }
@@ -587,6 +625,7 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
   let totalMatches = 0;
   let searchedFiles = 0;
   let truncated = false;
+  let overflowReadFailures = 0;
 
   for (const fileId of candidateIds) {
     if (options.signal?.aborted) throw new Error("semantic_grep aborted");
@@ -602,7 +641,10 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
   for (const filePath of index.overflowFiles) {
     if (options.signal?.aborted) throw new Error("semantic_grep aborted");
     const text = await readFile(filePath, "utf8").catch(() => undefined);
-    if (text === undefined) continue;
+    if (text === undefined) {
+      overflowReadFailures += 1;
+      continue;
+    }
     searchedFiles += 1;
     const displayPath = displayPathForMatch(repo, filePath);
     const lines = text.split(/\r?\n/);
@@ -630,13 +672,24 @@ export async function executeSemanticGrep(options: ExecuteSemanticGrepOptions): 
       searchedFiles,
       matchedFiles: matchedFiles.size,
       totalMatches,
+      shownMatches: matches.length,
+      matchTruncated: truncated,
       truncated,
       buildMs,
       queryMs: Math.round(performance.now() - queryStarted),
       sizeBytes: index.sizeBytes,
       cacheLocation: index.cacheLocation,
     },
+    coverage: coverageForIndex(index, searchedFiles, overflowReadFailures),
   };
+}
+
+function defaultGrepNote(note: string): boolean {
+  return note.startsWith("coverage is incomplete")
+    || note.startsWith("walk entry cap reached")
+    || note.startsWith("missing scope skipped")
+    || note.startsWith("unsupported scope skipped")
+    || note.startsWith("received ");
 }
 
 function groupMatches(matches: SemanticGrepMatch[]): Array<{ path: string; matches: SemanticGrepMatch[] }> {
@@ -663,7 +716,15 @@ function matchLines(match: SemanticGrepMatch, withContext: boolean): string[] {
   return lines;
 }
 
-export function formatSemanticGrepResult(result: SemanticGrepResult, enrichment?: SemanticGrepInspectEnrichment): string {
+export function formatSemanticGrepResult(
+  result: SemanticGrepResult,
+  enrichment?: SemanticGrepInspectEnrichment,
+  options: { verbose?: boolean } = {},
+): string {
+  const shownMatches = result.stats.shownMatches ?? result.matches.length;
+  const matchTruncated = result.stats.matchTruncated ?? result.stats.truncated;
+  const coverageReason = result.coverage.reason ? `; reason=${result.coverage.reason}` : "";
+  const notes = options.verbose ? result.notes : result.notes.filter(defaultGrepNote);
   const lines: string[] = [
     `# semantic-grep ts: ${result.pattern}`,
     `repo: ${result.repo}`,
@@ -672,18 +733,26 @@ export function formatSemanticGrepResult(result: SemanticGrepResult, enrichment?
   if (result.glob) lines.push(`glob: ${result.glob}`);
   lines.push(
     `mode: ${result.literal ? "literal" : "regex"}; ignore_case: ${result.ignoreCase}`,
-    `backend: ${result.backend}`,
-    `anchors: ${result.anchors.length ? JSON.stringify(result.anchors) : "none"}`,
     "",
-    "## Search stats",
-    `- cache_hit: ${result.stats.cacheHit}; cache_location: ${result.stats.cacheLocation}`,
-    `- indexed_files: ${result.stats.indexedFiles}; candidate_files: ${result.stats.candidateFiles}; searched_files: ${result.stats.searchedFiles}`,
-    `- matched_files: ${result.stats.matchedFiles}; total_matches: ${result.stats.totalMatches}; shown_matches: ${result.matches.length}; truncated: ${result.stats.truncated}`,
-    `- build_ms: ${result.stats.buildMs}; query_ms: ${result.stats.queryMs}; estimated_mem_mb: ${(result.stats.sizeBytes / (1024 * 1024)).toFixed(2)}`,
+    "## Result summary",
+    `- matches: total=${result.stats.totalMatches}; shown=${shownMatches}; match_truncated=${matchTruncated}`,
+    `- coverage: ${result.coverage.status}${coverageReason}`,
     "",
   );
+  if (options.verbose) {
+    lines.push(
+      "## Search diagnostics",
+      `- backend: ${result.backend}`,
+      `- anchors: ${result.anchors.length ? JSON.stringify(result.anchors) : "none"}`,
+      `- cache_hit: ${result.stats.cacheHit}; cache_location: ${result.stats.cacheLocation}`,
+      `- indexed_files: ${result.stats.indexedFiles}; overflow_files: ${result.coverage.overflowFiles}; candidate_files: ${result.stats.candidateFiles}; searched_files: ${result.stats.searchedFiles}`,
+      `- matched_files: ${result.stats.matchedFiles}; eligible_files: ${result.coverage.eligibleFiles}; read_failures: ${result.coverage.readFailures}`,
+      `- build_ms: ${result.stats.buildMs}; query_ms: ${result.stats.queryMs}; estimated_mem_mb: ${(result.stats.sizeBytes / (1024 * 1024)).toFixed(2)}`,
+      "",
+    );
+  }
   if (result.error) lines.push("## Error", `- ${result.error}`, "");
-  if (result.notes.length) lines.push("## Notes", ...result.notes.map((note) => `- ${note}`), "");
+  if (notes.length) lines.push("## Notes", ...notes.map((note) => `- ${note}`), "");
   lines.push("## Matches by file");
   if (!result.matches.length) {
     lines.push("- none");

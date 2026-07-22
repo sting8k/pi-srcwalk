@@ -122,7 +122,8 @@ What it does:
 - Uses a trigram-indexed pipeline: literal anchor extraction, candidate pruning, then exact line verification.
 - Falls back to full scanning when regex anchors are too weak or too complex.
 - Returns raw file:line matches with optional context lines.
-- By default, tries inspect enrichment for the top 3 shown grep matches when `srcwalk context` can infer an enclosing symbol; set `enrich: false` to keep raw matches only.
+- Returns raw matches by default; set `enrich: true` to add inspect enrichment for top shown matches when symbol context is useful.
+- Keeps operational diagnostics in structured details and verbose formatter output so default text stays concise.
 - Replaces built-in `grep` in the pi-srcwalk injected tool contract.
 
 | You ask | It returns |

@@ -106,10 +106,10 @@ test("formatResult groups normal evidence expansions by file and trace label", (
   assert.match(formatted, /### callees — 1 expansion/);
 });
 
-test("formatResult includes cache metrics section when cache stats exist", () => {
+test("formatResult keeps cache and command telemetry verbose-only", () => {
   const result: SearchResult = {
     plan: basePlan,
-    commandResults: [],
+    commandResults: [command("context:src/a.ts:1-2", "context", "context a")],
     candidates: [],
     expansions: [],
     notes: [],
@@ -135,9 +135,15 @@ test("formatResult includes cache metrics section when cache stats exist", () =>
     },
   };
 
-  const formatted = formatResult(result);
+  const concise = formatResult(result);
+  const verbose = formatResult(result, true);
 
-  assert.match(formatted, /## Cache/);
-  assert.match(formatted, /cache_hit: true/);
-  assert.match(formatted, /estimated_mem_mb:/);
+  assert.doesNotMatch(concise, /## Cache/);
+  assert.doesNotMatch(concise, /cache_hit: true/);
+  assert.doesNotMatch(concise, /## Commands executed/);
+  assert.match(verbose, /## Cache/);
+  assert.match(verbose, /cache_hit: true/);
+  assert.match(verbose, /estimated_mem_mb:/);
+  assert.match(verbose, /## Commands executed/);
+  assert.match(verbose, /context:src\/a\.ts:1-2/);
 });

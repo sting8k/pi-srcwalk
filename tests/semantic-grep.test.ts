@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -91,6 +91,11 @@ test("semantic_grep reports invalid regex without scanning candidate lines", asy
   assert.equal(result.stats.candidateFiles, 0);
   assert.equal(result.stats.searchedFiles, 0);
   assert.equal(result.stats.totalMatches, 0);
+  assert.equal(result.stats.shownMatches, 0);
+  assert.equal(result.stats.matchTruncated, false);
+  assert.equal(result.coverage.status, "unknown");
+  assert.equal(result.coverage.reason, "invalid regex");
+  assert.equal(result.coverage.readFailures, 0);
 });
 
 test("formatSemanticGrepResult groups shown matches by file", async () => {
@@ -101,7 +106,16 @@ test("formatSemanticGrepResult groups shown matches by file", async () => {
 
   const result = await executeSemanticGrep({ repo, scopes: ["."], pattern: "ABC-212", literal: true, maxResults: 3 });
   const formatted = formatSemanticGrepResult(result);
+  const verbose = formatSemanticGrepResult(result, undefined, { verbose: true });
 
+  assert.match(formatted, /## Result summary/);
+  assert.match(formatted, /matches: total=3; shown=3; match_truncated=false/);
+  assert.match(formatted, /coverage: complete/);
+  assert.doesNotMatch(formatted, /## Search diagnostics/);
+  assert.doesNotMatch(formatted, /cache_location:/);
+  assert.match(verbose, /## Search diagnostics/);
+  assert.match(verbose, /cache_location:/);
+  assert.match(verbose, /backend: trigram-index/);
   assert.match(formatted, /## Matches by file/);
   assert.match(formatted, /### src\/a\.ts — 2 shown/);
   assert.match(formatted, /### src\/b\.ts — 1 shown/);
@@ -136,7 +150,7 @@ test("selectSemanticGrepEnrichmentTargets skips non-repo-relative paths", () => 
 
 test("formatSemanticGrepResult renders skipped entries even with no inspected items", () => {
   const formatted = formatSemanticGrepResult(
-    { repo: "test", scopes: ["src"], pattern: "foo", glob: undefined, literal: true, ignoreCase: false, backend: "trigram-index", anchors: [], stats: { cacheHit: false, cacheLocation: "memory:x", indexedFiles: 1, candidateFiles: 1, searchedFiles: 1, matchedFiles: 1, totalMatches: 1, truncated: false, buildMs: 1, queryMs: 1, sizeBytes: 100 }, notes: [], matches: [{ path: "src/a.ts", line: 1, text: "foo", before: [], after: [] }] },
+    { repo: "test", scopes: ["src"], pattern: "foo", glob: undefined, literal: true, ignoreCase: false, backend: "trigram-index", anchors: [], stats: { cacheHit: false, cacheLocation: "memory:x", indexedFiles: 1, candidateFiles: 1, searchedFiles: 1, matchedFiles: 1, totalMatches: 1, shownMatches: 1, matchTruncated: false, truncated: false, buildMs: 1, queryMs: 1, sizeBytes: 100 }, coverage: { status: "complete", indexedFiles: 1, overflowFiles: 0, searchedFiles: 1, eligibleFiles: 1, readFailures: 0 }, notes: [], matches: [{ path: "src/a.ts", line: 1, text: "foo", before: [], after: [] }] },
     {
       mode: "inspect",
       relation: "all",
@@ -219,8 +233,11 @@ test("semantic_grep reports truncation metrics when maxResults is lower than tot
   assert.equal(result.stats.searchedFiles, 1);
   assert.equal(result.stats.matchedFiles, 1);
   assert.equal(result.stats.totalMatches, 3);
+  assert.equal(result.stats.shownMatches, 2);
+  assert.equal(result.stats.matchTruncated, true);
   assert.equal(result.stats.truncated, true);
   assert.equal(result.matches.length, 2);
+  assert.equal(result.coverage.status, "complete");
 });
 
 test("semantic_grep stream-verifies overflow files outside the index budget", async () => {
@@ -239,11 +256,47 @@ test("semantic_grep stream-verifies overflow files outside the index budget", as
     assert.equal(result.stats.candidateFiles, 1);
     assert.equal(result.stats.searchedFiles, 1);
     assert.equal(result.stats.totalMatches, 1);
+    assert.equal(result.coverage.status, "complete");
+    assert.equal(result.coverage.indexedFiles, 1);
+    assert.equal(result.coverage.overflowFiles, 1);
+    assert.equal(result.coverage.searchedFiles, 1);
+    const concise = formatSemanticGrepResult(result);
+    const verbose = formatSemanticGrepResult(result, undefined, { verbose: true });
+    assert.doesNotMatch(concise, /stream-verified 1 overflow files/);
+    assert.match(verbose, /stream-verified 1 overflow files/);
     assert.deepEqual(result.matches.map((match) => `${match.path}:${match.line}`), ["src/b.ts:1"]);
     assert.match(result.notes.join("\n"), /stream-verified 1 overflow files/);
   } finally {
     if (previous === undefined) delete process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES;
     else process.env.PI_SRCWALK_GREP_MAX_INDEXED_FILES = previous;
+  }
+});
+
+test("semantic_grep marks coverage incomplete when an eligible file cannot be read", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX chmod-based unreadable-file fixture");
+    return;
+  }
+  const repo = await fixtureRepo({
+    "src/a.ts": "readable control\n",
+    "src/b.ts": "READFAIL target hidden by permissions\n",
+  });
+  const unreadable = path.join(repo, "src/b.ts");
+  await chmod(unreadable, 0o000);
+  try {
+    const result = await executeSemanticGrep({ repo, scopes: ["."], pattern: "READFAIL", literal: true });
+    if (result.coverage.readFailures === 0) {
+      t.skip("filesystem permissions did not prevent reading fixture file");
+      return;
+    }
+
+    assert.equal(result.coverage.status, "incomplete");
+    assert.match(result.coverage.reason ?? "", /could not be read/);
+    assert.equal(result.coverage.readFailures, 1);
+    assert.equal(result.coverage.eligibleFiles, 2);
+    assert.equal(result.stats.totalMatches, 0);
+  } finally {
+    await chmod(unreadable, 0o600).catch(() => undefined);
   }
 });
 

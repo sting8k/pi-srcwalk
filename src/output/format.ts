@@ -136,10 +136,12 @@ export function formatResult(result: SearchResult, verbose = false): string {
     `- top_score: ${confidence.topScore.toFixed(1)}; top_gap: ${confidence.topGap.toFixed(1)}; top_file_cluster: ${confidence.topFileCluster}; path_keyword_coverage: ${confidence.pathKeywordCoverage.toFixed(2)}`,
     "",
   ];
-  if (result.cache) {
-    lines.push("## Cache", `- cache_kind: ${result.cache.cacheKind}`, `- cache_hit: ${result.cache.cacheHit}`, `- chunks: ${result.cache.chunks}; files: ${result.cache.files}; estimated_mem_mb: ${(result.cache.sizeBytes / (1024 * 1024)).toFixed(2)}`, `- cache_location: ${result.cache.cacheLocation}`, "");
+  if (verbose) {
+    if (result.cache) {
+      lines.push("## Cache", `- cache_kind: ${result.cache.cacheKind}`, `- cache_hit: ${result.cache.cacheHit}`, `- chunks: ${result.cache.chunks}; files: ${result.cache.files}; estimated_mem_mb: ${(result.cache.sizeBytes / (1024 * 1024)).toFixed(2)}`, `- cache_location: ${result.cache.cacheLocation}`, "");
+    }
+    lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
   }
-  lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
   const notes = plan.queryIR?.hasHints ? [`QueryIR: ${describeQueryIR(plan.queryIR)}`, ...result.notes] : result.notes;
   if (notes.length) lines.push("## Notes", ...notes.map((note) => `- ${note}`), "");
   lines.push("## Best candidate files");

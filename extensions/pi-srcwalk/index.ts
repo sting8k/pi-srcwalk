@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import type { SrcwalkCommand } from "../../src/domain/types.js";
 import { formatInspectCommandResult } from "../../src/output/format.js";
 import type {
+  SemanticGrepCoverage,
   SemanticGrepEnrichmentRelation,
   SemanticGrepInspectEnrichment,
   SemanticGrepResult,
@@ -14,6 +15,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { boundShowOutput, showTargetStatus, splitShowTargets } from "../../src/output/show.js";
 import { getRuntimeModules } from "../../src/runtime/module-load.js";
+import { semanticGrepEnrichmentEnabled } from "../../src/grep/enrichment-policy.js";
 
 const QueryParams = Type.Object({
   query: Type.String({ description: "What to find: natural-language question, symbol, file, path:line, overview, deps, or tests. Use semantic_inspect for known-symbol context/callers/callees/references." }),
@@ -32,7 +34,7 @@ const GrepParams = Type.Object({
   context: Type.Optional(Type.Number({ description: "Number of surrounding lines to include around each match." })),
   limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)." })),
   max_results: Type.Optional(Type.Number({ description: "Alias of limit." })),
-  enrich: Type.Optional(Type.Boolean({ description: "Semantic inspect enrichment for top grep results. Enabled by default; set false to disable." })),
+  enrich: Type.Optional(Type.Boolean({ description: "Opt into semantic inspect enrichment for top grep results. Defaults to raw matches only; set true to include inspect context." })),
 });
 
 const ReviewParams = Type.Object({
@@ -69,6 +71,13 @@ interface ToolResultLike {
   details?: unknown;
 }
 
+interface OutputDetails {
+  truncated: boolean;
+  totalLines: number;
+  outputLines: number;
+  fullOutputPath?: string;
+}
+
 interface SemanticQueryDetails {
   searchId?: string;
   query: string;
@@ -76,6 +85,7 @@ interface SemanticQueryDetails {
   confidence: { abstained: boolean; level: string; reason: string };
   candidates: Array<{ id?: number; target: string; symbol?: string; score: number; source: string; kind: string }>;
   cache?: { cacheKind: string; cacheHit: boolean; chunks: number; files: number; cacheLocation: string };
+  output?: OutputDetails;
   truncated?: boolean;
   fullOutputPath?: string;
 }
@@ -88,25 +98,15 @@ interface SemanticGrepDetails {
   ignoreCase: boolean;
   backend: string;
   anchors: string[];
-  stats: {
-    cacheHit: boolean;
-    indexedFiles: number;
-    candidateFiles: number;
-    searchedFiles: number;
-    matchedFiles: number;
-    totalMatches: number;
-    truncated: boolean;
-    buildMs: number;
-    queryMs: number;
-    sizeBytes: number;
-    cacheLocation: string;
-  };
+  stats: SemanticGrepResult["stats"];
+  coverage: SemanticGrepCoverage;
+  matchTruncated: boolean;
+  output?: OutputDetails;
   error?: string;
   truncated?: boolean;
   fullOutputPath?: string;
   enrichment?: { mode: "inspect"; relation: SemanticGrepEnrichmentRelation; inspectId?: string; requested: number; inspected: number; skipped: number; status: string; elapsedMs: number };
 }
-
 
 interface SemanticInspectDetails {
   inspectId: string;
@@ -115,8 +115,18 @@ interface SemanticInspectDetails {
   relation: string;
   scope: string;
   candidates: Array<{ id?: number; target: string; symbol?: string }>;
+  output?: OutputDetails;
   truncated?: boolean;
   fullOutputPath?: string;
+}
+
+function outputDetails(truncated: OutputDetails): OutputDetails {
+  return {
+    truncated: truncated.truncated,
+    totalLines: truncated.totalLines,
+    outputLines: truncated.outputLines,
+    fullOutputPath: truncated.fullOutputPath,
+  };
 }
 
 // === Search Registry (for semantic_show) ===
@@ -304,12 +314,6 @@ function formatInspectPacket(repo: string, symbol: string, relation: string, sco
 
 const SEMANTIC_GREP_ENRICH_LIMIT = 3;
 
-function semanticGrepEnrichmentEnabled(enrich: unknown): boolean {
-  if (enrich === false) return false;
-  if (typeof enrich !== "string") return true;
-  const normalized = enrich.trim().toLowerCase();
-  return !["0", "false", "no", "none", "off"].includes(normalized);
-}
 
 async function buildSemanticGrepInspectEnrichment(
   result: SemanticGrepResult,
@@ -406,6 +410,7 @@ interface SemanticReviewDetails {
   shownFiles?: number;
   changedHunks?: number;
   changedSymbols?: number;
+  output?: OutputDetails;
   truncated?: boolean;
   fullOutputPath?: string;
 }
@@ -598,6 +603,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         confidence: { abstained: result.confidence.abstained, level: result.confidence.level, reason: result.confidence.reason },
         candidates: candidatesWithIds,
         cache: result.cache ? { cacheKind: result.cache.cacheKind, cacheHit: result.cache.cacheHit, chunks: result.cache.chunks, files: result.cache.files, cacheLocation: result.cache.cacheLocation } : undefined,
+        output: outputDetails(truncated),
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
       };
@@ -633,7 +639,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "Use semantic_grep for raw text or regex matches; use semantic_query for NL/code-intent discovery.",
       "Default mode is regex; set literal=true for exact strings such as dotted paths, versions, or method chains.",
       "Set scopes to one or more dir/file paths when needed; glob only when a file-pattern filter is useful.",
-      "By default, semantic_grep tries inspect enrichment for the top 3 shown matches when a symbol can be inferred; set enrich=false for raw matches only.",
+      "By default, semantic_grep returns raw matches only; set enrich=true to inspect-enrich the top shown matches when symbol context is needed.",
       "Treat semantic_grep as the pi-srcwalk replacement for the default grep tool; avoid built-in grep unless semantic_grep lacks support and say why.",
     ],
     parameters: GrepParams,
@@ -690,6 +696,9 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         backend: result.backend,
         anchors: result.anchors,
         stats: result.stats,
+        coverage: result.coverage,
+        matchTruncated: result.stats.matchTruncated,
+        output: outputDetails(truncated),
         error: result.error,
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
@@ -723,7 +732,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if (details.error) return new Text(theme.fg("warning", `semantic_grep error: ${details.error}`), 0, 0);
       let text = theme.fg("success", `${details.stats.totalMatches} match(es)`) + theme.fg("dim", ` · ${details.backend} · ${details.stats.candidateFiles}/${details.stats.indexedFiles} files`);
       if (details.enrichment) text += theme.fg("dim", ` · enrich ${details.enrichment.status}:${details.enrichment.inspected}/${details.enrichment.requested}`);
-      if (details.stats.truncated) text += theme.fg("warning", " · match limit");
+      if (details.matchTruncated) text += theme.fg("warning", " · match limit");
       if (details.truncated) text += theme.fg("warning", " · output truncated");
       if (expanded) {
         text += `\n${theme.fg("dim", `anchors: ${details.anchors.length ? details.anchors.join(", ") : "none"}`)}`;
@@ -838,6 +847,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         relation,
         scope,
         candidates: allCandidates,
+        output: outputDetails(truncated),
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
       };
@@ -901,6 +911,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         code: result.code,
         elapsedMs: result.elapsedMs,
         ...parseReviewDetails(result.output),
+        output: outputDetails(truncated),
         truncated: truncated.truncated,
         fullOutputPath: truncated.fullOutputPath,
       };
@@ -1073,7 +1084,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "   when anchors are strong → verify exact line matches;",
       "   full-scan fallback when regex is too weak or complex.",
       "   Default mode is regex; set literal=true for exact string matches.",
-      "   It tries inspect enrichment for the top 3 shown matches by default; set enrich=false for raw matches only.",
+      "   It returns raw matches by default; set enrich=true to inspect-enrich top shown matches when needed.",
       "3. **semantic_inspect** — known symbol(s) deep inspect:",
       "   context + callers + callees + references in one shot.",
       "   Accepts one symbol or up to 3 symbols. Runs srcwalk context,",
