@@ -53,5 +53,6 @@ No harness policy change expected.
 - `npm test` ✅ — 41/41
 - `git diff --check` ✅
 - Direct smoke output check ✅ — grep/query concise default hides diagnostics; verbose output preserves diagnostics.
+- Post-reload live Pi test ✅ — grep default/enrich behavior passed; live query exposed cache/ranking telemetry leaking through Notes, then regression test and formatter filtering were added.
 - Reviewer agent returned rework; P2 findings fixed: operational grep notes are verbose-only by default, and unreadable eligible files now mark coverage incomplete.
 - Harness durable story row updated to `implemented`.

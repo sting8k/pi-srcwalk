@@ -112,7 +112,11 @@ test("formatResult keeps cache and command telemetry verbose-only", () => {
     commandResults: [command("context:src/a.ts:1-2", "context", "context a")],
     candidates: [],
     expansions: [],
-    notes: [],
+    notes: [
+      "TS memory cache built for scope `src`: 12 chunks, estimated 0.10MB at memory:abc123, prepare 8ms, query 2ms.",
+      "Extra fusion skipped: strong BM25 cluster; preserves strong BM25 cluster.",
+      "TS BM25 streaming mode scanned 3 discovered files / 12 chunks with incomplete coverage because the walk cap was reached; PRF disabled to stay memory bounded.",
+    ],
     confidence: {
       level: "low",
       abstained: true,
@@ -141,9 +145,14 @@ test("formatResult keeps cache and command telemetry verbose-only", () => {
   assert.doesNotMatch(concise, /## Cache/);
   assert.doesNotMatch(concise, /cache_hit: true/);
   assert.doesNotMatch(concise, /## Commands executed/);
+  assert.doesNotMatch(concise, /TS memory cache/);
+  assert.doesNotMatch(concise, /Extra fusion skipped/);
+  assert.match(concise, /incomplete coverage because the walk cap was reached/);
   assert.match(verbose, /## Cache/);
   assert.match(verbose, /cache_hit: true/);
   assert.match(verbose, /estimated_mem_mb:/);
   assert.match(verbose, /## Commands executed/);
+  assert.match(verbose, /TS memory cache/);
+  assert.match(verbose, /Extra fusion skipped/);
   assert.match(verbose, /context:src\/a\.ts:1-2/);
 });
