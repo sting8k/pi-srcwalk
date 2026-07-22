@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.8] - 2026-07-22
+
+### Changed
+- `semantic_query` default output now hides cache, command, timing, and ranking diagnostics while preserving the same candidate/evidence semantics; verbose formatting still includes diagnostics.
+- `semantic_grep` now returns raw matches by default. Use `enrich: true` to opt into inspect enrichment for top matches.
+
+### Added
+- `semantic_grep` output now reports explicit coverage status, shown/match truncation, and unreadable-file counts so callers can distinguish incomplete searches from display truncation.
+
+### Fixed
+- Unreadable eligible grep files now mark coverage incomplete instead of falsely reporting complete coverage.
+
 ## [1.2.5] - 2026-06-26
 
 ### Changed
