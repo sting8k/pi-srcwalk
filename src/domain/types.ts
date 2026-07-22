@@ -93,6 +93,11 @@ export interface CacheStats {
   buildMs: number;
   queryMs: number;
   sizeBytes: number;
+  retrievalMode?: "indexed" | "streaming";
+  coverageCapped?: boolean;
+  eligibleFiles?: number;
+  totalBytes?: number;
+  notes?: string[];
 }
 
 export interface CompactPostings {
