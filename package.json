@@ -1,6 +1,6 @@
 {
   "name": "@sting8k/pi-srcwalk",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "Makes structural code-intelligence easy for AI coding agents",
   "type": "module",
   "main": "extensions/pi-srcwalk/index.ts",

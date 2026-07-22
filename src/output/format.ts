@@ -120,6 +120,17 @@ function candidateLine(candidate: Candidate): string {
   return `${span}: ${label} — score=${candidate.score.toFixed(1)}, source=${candidate.source}, kind=${candidate.kind}`;
 }
 
+function defaultQueryNote(note: string): boolean {
+  if (note.startsWith("TS memory cache ")) return false;
+  if (note.startsWith("Extra fusion skipped:")) return false;
+  if (note.startsWith("TS RRF fused ranks:")) return false;
+  if (note.startsWith("QueryIR:")) return false;
+  if (note.startsWith("BM25 index acceleration budget exceeded;")) return false;
+  if (note.startsWith("BM25 index estimate ")) return false;
+  if (note.startsWith("TS BM25 streaming mode scanned ")) return note.includes("incomplete coverage");
+  return true;
+}
+
 export function formatResult(result: SearchResult, verbose = false): string {
   const { plan, confidence } = result;
   const lines: string[] = [
@@ -136,11 +147,14 @@ export function formatResult(result: SearchResult, verbose = false): string {
     `- top_score: ${confidence.topScore.toFixed(1)}; top_gap: ${confidence.topGap.toFixed(1)}; top_file_cluster: ${confidence.topFileCluster}; path_keyword_coverage: ${confidence.pathKeywordCoverage.toFixed(2)}`,
     "",
   ];
-  if (result.cache) {
-    lines.push("## Cache", `- cache_kind: ${result.cache.cacheKind}`, `- cache_hit: ${result.cache.cacheHit}`, `- chunks: ${result.cache.chunks}; files: ${result.cache.files}; estimated_mem_mb: ${(result.cache.sizeBytes / (1024 * 1024)).toFixed(2)}`, `- cache_location: ${result.cache.cacheLocation}`, "");
+  if (verbose) {
+    if (result.cache) {
+      lines.push("## Cache", `- cache_kind: ${result.cache.cacheKind}`, `- cache_hit: ${result.cache.cacheHit}`, `- chunks: ${result.cache.chunks}; files: ${result.cache.files}; estimated_mem_mb: ${(result.cache.sizeBytes / (1024 * 1024)).toFixed(2)}`, `- cache_location: ${result.cache.cacheLocation}`, "");
+    }
+    lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
   }
-  lines.push("## Commands executed", ...result.commandResults.map(commandLine), "");
-  const notes = plan.queryIR?.hasHints ? [`QueryIR: ${describeQueryIR(plan.queryIR)}`, ...result.notes] : result.notes;
+  const allNotes = plan.queryIR?.hasHints ? [`QueryIR: ${describeQueryIR(plan.queryIR)}`, ...result.notes] : result.notes;
+  const notes = verbose ? allNotes : allNotes.filter(defaultQueryNote);
   if (notes.length) lines.push("## Notes", ...notes.map((note) => `- ${note}`), "");
   lines.push("## Best candidate files");
   if (!result.candidates.length) {
