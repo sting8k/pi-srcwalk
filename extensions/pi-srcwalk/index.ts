@@ -1,8 +1,7 @@
 import type { AgentToolUpdateCallback, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { normalizeSrcwalkArgs } from "../../src/args.js";
-import { runSrcwalk } from "../../src/runner.js";
+import { planBatch, runBatch, MAX_BATCH_COMMANDS } from "../../src/batch.js";
 
 // === stale tools-rules cleanup (pre-1.3 legacy) ===
 // Old pi-srcwalk versions injected a semantic_* contract block into the
@@ -13,18 +12,44 @@ const SENTINEL_START = "<!-- pi-srcwalk:tools-rules:start -->";
 const SENTINEL_END = "<!-- pi-srcwalk:tools-rules:end -->";
 
 const SrcwalkParams = Type.Object({
-  args: Type.String({
-    description:
-      "Full srcwalk command line, e.g. \"context executeSearch --scope src\" or \"discover buildOrLoadIndex --expand\". " +
-      "Do not prefix with 'srcwalk'. Run \"guide\" for the embedded usage guide.",
-  }),
+  args: Type.Union([
+    Type.String({
+      description:
+        "Full srcwalk command line, e.g. \"context executeSearch --scope src\" or \"discover buildOrLoadIndex --expand\". " +
+        "Do not prefix with 'srcwalk'. Run \"guide\" for the embedded usage guide.",
+    }),
+    Type.Array(Type.String(), {
+      description:
+        `Batch of up to ${MAX_BATCH_COMMANDS} independent srcwalk command lines, run concurrently and returned in order. ` +
+        "Each element is one full command line. Use this instead of shell chaining.",
+    }),
+  ]),
 });
 
-interface SrcwalkDetails {
+interface SrcwalkCommandDetails {
   command: string;
   exitCode: number;
   elapsedMs: number;
   binaryNotFound: boolean;
+}
+
+interface SrcwalkDetails {
+  commands: SrcwalkCommandDetails[];
+  totalElapsedMs: number;
+}
+
+const BINARY_NOT_FOUND_MSG =
+  "[srcwalk] binary not found on PATH — install with `npm install -g srcwalk` or run via `npx srcwalk`.";
+
+/** Wrap one command's raw output with exit/ENOENT prefixes. */
+function describeResult(raw: string, output: string, exitCode: number, binaryNotFound: boolean): string {
+  let text = output;
+  if (binaryNotFound) {
+    text = `${BINARY_NOT_FOUND_MSG}\n\n${text}`;
+  } else if (exitCode !== 0) {
+    text = `[srcwalk exit ${exitCode}]\n${text}`;
+  }
+  return text;
 }
 
 export default function piSrcwalkExtension(pi: ExtensionAPI) {
@@ -33,49 +58,64 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
     label: "Srcwalk",
     description:
       "Run the srcwalk CLI directly: structural code intelligence (context, trace, deps, discover, overview, review, compare, assess, show, guide). " +
-      "Use this tool instead of bash for code-structure reads.",
+      "Use this tool instead of bash for code-structure reads. " +
+      "Output is bounded by srcwalk's own --budget (default 6000 tokens); no tool-side cap. " +
+      "No shell: shell metacharacters are rejected, and multiple commands are passed as an array (batch).",
     promptSnippet: "Run srcwalk CLI for code structure",
     promptGuidelines: [
       "Use the srcwalk tool instead of bash for code-structure reads: context, trace callers/callees, deps, discover, overview, review, compare, assess, show.",
       "Pass the full command line in args, e.g. \"context executeSearch --scope src\". Do not prefix it with 'srcwalk'.",
-      "Output is self-bounded by --budget (default 6000 tokens); add --no-budget only when full output is truly needed.",
+      "Batch independent lookups in one call by passing args as an array of up to 6 command lines; dependent follow-ups (output of one command feeding the next) go in the next call — the agent is the pipe.",
+      "Shell metacharacters (|, >, <, ;, &) are rejected — no shell; batch is the replacement for shell chaining.",
+      "Output is self-bounded by --budget per command (default 6000 tokens); lower --budget on large batches and add --no-budget only when full output is truly needed.",
       "When unsure how to phrase a command, run \"guide\" first.",
     ],
     parameters: SrcwalkParams,
     prepareArguments(args: unknown) {
       const input = (args ?? {}) as Record<string, unknown>;
+      if (Array.isArray(input.args)) {
+        return { args: input.args.filter((a): a is string => typeof a === "string") };
+      }
       return { args: typeof input.args === "string" ? input.args : "" };
     },
-    async execute(_toolCallId: string, params: { args: string }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback | undefined, ctx: { cwd: string }) {
-      onUpdate?.({ content: [{ type: "text", text: `Running srcwalk ${params.args}...` }], details: undefined });
-
-      const normalized = normalizeSrcwalkArgs(params.args);
-      if ("error" in normalized) {
+    async execute(_toolCallId: string, params: { args: string | string[] }, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback | undefined, ctx: { cwd: string }) {
+      const planned = planBatch(params.args);
+      if ("error" in planned) {
         return {
-          content: [{ type: "text", text: `[srcwalk] ${normalized.error}` }],
-          details: { command: params.args, exitCode: 0, elapsedMs: 0, binaryNotFound: false } satisfies SrcwalkDetails,
+          content: [{ type: "text", text: `[srcwalk] ${planned.error}` }],
+          details: { commands: [], totalElapsedMs: 0 } satisfies SrcwalkDetails,
         };
       }
 
-      const result = await runSrcwalk(ctx.cwd, normalized.tokens, signal);
+      const isBatch = planned.commands.length > 1;
+      const preview = isBatch
+        ? `${planned.commands.length} commands`
+        : planned.commands[0]!.raw;
+      onUpdate?.({ content: [{ type: "text", text: `Running srcwalk ${preview}...` }], details: undefined });
 
-      let text = result.output;
-      if (result.binaryNotFound) {
-        text = `[srcwalk] binary not found on PATH — install with \`npm install -g srcwalk\` or run via \`npx srcwalk\`.\n\n${text}`;
-      } else if (result.exitCode !== 0) {
-        text = `[srcwalk exit ${result.exitCode}]\n${text}`;
-      }
+      const batch = await runBatch(ctx.cwd, planned.commands, signal);
+
+      const text = batch.results
+        .map(({ raw, result }) => {
+          const block = describeResult(raw, result.output, result.exitCode, result.binaryNotFound);
+          return isBatch ? `--- $ srcwalk ${raw} ---\n${block}` : block;
+        })
+        .join("\n\n");
 
       const details: SrcwalkDetails = {
-        command: params.args,
-        exitCode: result.exitCode,
-        elapsedMs: result.elapsedMs,
-        binaryNotFound: result.binaryNotFound,
+        commands: batch.results.map(({ raw, result }) => ({
+          command: raw,
+          exitCode: result.exitCode,
+          elapsedMs: result.elapsedMs,
+          binaryNotFound: result.binaryNotFound,
+        })),
+        totalElapsedMs: batch.totalElapsedMs,
       };
       return { content: [{ type: "text", text }], details };
     },
-    renderCall(args: { args?: string }, theme: ThemeLike) {
-      return new Text(theme.fg("toolTitle", theme.bold("srcwalk ")) + theme.fg("accent", args.args ?? ""), 0, 0);
+    renderCall(args: { args?: string | string[] }, theme: ThemeLike) {
+      const label = Array.isArray(args.args) ? `[${args.args.length} commands] ${args.args.join(" | ")}` : (args.args ?? "");
+      return new Text(theme.fg("toolTitle", theme.bold("srcwalk ")) + theme.fg("accent", label), 0, 0);
     },
     renderResult(result: ToolResultLike, { isPartial }: { isPartial: boolean }, theme: ThemeLike) {
       if (isPartial) return new Text(theme.fg("warning", "Running srcwalk..."), 0, 0);

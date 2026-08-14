@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 - Removed the `semantic_*` contract injection into the system prompt; the extension now only cleans up the stale sentinel block from older installs.
 
 ### Added
+- Batch multi-call: `args` accepts an array of up to 6 independent command lines, run concurrently (3 at a time) and returned in order with `--- $ srcwalk <cmd> ---` headers; no fail-fast.
+- Shell metacharacter rejection (`|`, `>`, `<`, `;`, `&` outside quotes) with a hint to use the batch array instead.
 - Missing-binary detection with actionable install instructions, and `[srcwalk exit N]` prefixes on non-zero exits.
 
 ## [1.2.8] - 2026-07-22

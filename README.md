@@ -25,10 +25,18 @@ Example tool call:
 srcwalk({ args: "context executeSearch --scope src" })
 ```
 
-- `args` is the full command line (do **not** prefix it with `srcwalk`).
+Multiple independent lookups go in one call as a batch:
+
+```ts
+srcwalk({ args: ["context executeSearch --scope src", "trace callers buildOrLoadIndex"] })
+```
+
+- `args` is a single command line, or an array of up to 6 independent command lines run concurrently and returned in order (single string = one command, unchanged).
 - Runs with the open repo as cwd (`--scope .` resolves there).
 - Output is returned verbatim (stdout + stderr). `srcwalk` self-bounds output via `--budget` (default 6000 tokens); add `--no-budget` only when full output is truly needed.
 - Non-zero exits are prefixed with `[srcwalk exit N]`; a missing binary returns install instructions.
+- Batch output uses `--- $ srcwalk <cmd> ---` headers; failures stay inline and never stop the rest of the batch.
+- No shell: `|`, `>`, `<`, `;`, `&` outside quotes are rejected with a hint to use the batch array instead.
 
 ## Install
 

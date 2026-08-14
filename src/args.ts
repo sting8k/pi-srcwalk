@@ -59,6 +59,33 @@ export function splitArgs(input: string): string[] {
   return tokens;
 }
 
+/**
+ * Find the first shell metacharacter (|, >, <, ;, &) that appears outside
+ * quotes. The tool never runs a shell, so these are rejected with a clear
+ * hint instead of being passed through as literal argv.
+ */
+export function findShellMetachar(input: string): string | undefined {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]!;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      else if (ch === "\\" && quote === '"') i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (ch === "|" || ch === ">" || ch === "<" || ch === ";" || ch === "&") return ch;
+  }
+  return undefined;
+}
+
 export type NormalizedArgs = { tokens: string[] } | { error: string };
 
 /**
