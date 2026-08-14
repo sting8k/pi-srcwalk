@@ -73,3 +73,10 @@ test("splitArgs: quoted newlines are preserved", () => {
   assert.deepEqual(splitArgs('"a\nb"'), ["a\nb"]);
   assert.deepEqual(splitArgs("'a\nb'"), ["a\nb"]);
 });
+
+test("splitArgs: trailing backslash is rejected instead of swallowed", () => {
+  assert.throws(() => splitArgs("cmd \\"), /Trailing backslash/);
+  assert.throws(() => splitArgs("a b\\"), /Trailing backslash/);
+  // backslash before a char is still fine
+  assert.deepEqual(splitArgs("cmd a\\ b"), ["cmd", "a b"]);
+});

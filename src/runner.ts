@@ -61,6 +61,6 @@ export async function runSrcwalk(
       const notFound = (err as NodeJS.ErrnoException).code === "ENOENT";
       finish(-1, notFound ? "" : `\n${err.message}`, notFound);
     });
-    child.on("close", (code) => finish(code ?? 0));
+    child.on("close", (code, signal) => finish(code ?? (signal ? -1 : 0)));
   });
 }

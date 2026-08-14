@@ -50,7 +50,10 @@ export function splitArgs(input: string): string[] {
       tokenStarted = true;
     } else if (ch === "\\") {
       i++;
-      if (i < input.length) current += input[i]!;
+      if (i >= input.length) {
+        throw new Error(`Trailing backslash in args: ${input}`);
+      }
+      current += input[i]!;
       tokenStarted = true;
     } else {
       current += ch;
