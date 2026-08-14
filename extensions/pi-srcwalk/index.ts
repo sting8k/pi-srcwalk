@@ -63,12 +63,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       "No shell: shell metacharacters are rejected, and multiple commands are passed as an array (batch).",
     promptSnippet: "Run srcwalk CLI for code structure",
     promptGuidelines: [
-      "Use the srcwalk tool instead of bash for code-structure reads: context, trace callers/callees, deps, discover, overview, review, compare, assess, show.",
-      "Pass the full command line in args, e.g. \"context executeSearch --scope src\". Do not prefix it with 'srcwalk'.",
-      "Batch independent lookups in one call by passing args as an array of up to 6 command lines; dependent follow-ups (output of one command feeding the next) go in the next call — the agent is the pipe.",
-      "Shell metacharacters (|, >, <, ;, &) are rejected — no shell; batch is the replacement for shell chaining.",
-      "Keep --scope as narrow as the evidence question allows; output is self-bounded by --budget per command (default 6000 tokens) — lower --budget on large batches and add --no-budget only when full output is truly needed.",
-      "When unsure how to phrase a command, run \"guide\" first.",
+      "Always prefer the srcwalk tool over bash grep/rg/cat/find/tree for code reads and navigation; start with \"guide\" when unsure.",
     ],
     parameters: SrcwalkParams,
     prepareArguments(args: unknown) {
