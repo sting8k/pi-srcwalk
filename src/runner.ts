@@ -24,6 +24,12 @@ export async function runSrcwalk(
 ): Promise<SrcwalkResult> {
   const started = performance.now();
 
+  // An already-aborted signal never fires the abort listener in Node — bail
+  // before spawning instead of letting the child run to completion.
+  if (signal?.aborted) {
+    return { output: "\nCommand aborted", exitCode: -1, elapsedMs: 0, binaryNotFound: false };
+  }
+
   return await new Promise<SrcwalkResult>((resolve) => {
     const child = spawn("srcwalk", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     const stdout: Buffer[] = [];

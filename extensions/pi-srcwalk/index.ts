@@ -42,10 +42,10 @@ const BINARY_NOT_FOUND_MSG =
   "[srcwalk] binary not found on PATH — install with `npm install -g srcwalk` or run via `npx srcwalk`.";
 
 /** Wrap one command's raw output with exit/ENOENT prefixes. */
-function describeResult(raw: string, output: string, exitCode: number, binaryNotFound: boolean): string {
+function describeResult(output: string, exitCode: number, binaryNotFound: boolean, showNotice: boolean): string {
   let text = output;
   if (binaryNotFound) {
-    text = `${BINARY_NOT_FOUND_MSG}\n\n${text}`;
+    if (showNotice) text = `${BINARY_NOT_FOUND_MSG}\n\n${text}`;
   } else if (exitCode !== 0) {
     text = `[srcwalk exit ${exitCode}]\n${text}`;
   }
@@ -95,9 +95,12 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
 
       const batch = await runBatch(ctx.cwd, planned.commands, signal);
 
+      let noticeShown = false;
       const text = batch.results
         .map(({ raw, result }) => {
-          const block = describeResult(raw, result.output, result.exitCode, result.binaryNotFound);
+          const showNotice = !noticeShown;
+          if (result.binaryNotFound) noticeShown = true;
+          const block = describeResult(result.output, result.exitCode, result.binaryNotFound, showNotice);
           return isBatch ? `--- $ srcwalk ${raw} ---\n${block}` : block;
         })
         .join("\n\n");
@@ -114,7 +117,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       return { content: [{ type: "text", text }], details };
     },
     renderCall(args: { args?: string | string[] }, theme: ThemeLike) {
-      const label = Array.isArray(args.args) ? `[${args.args.length} commands] ${args.args.join(" | ")}` : (args.args ?? "");
+      const label = Array.isArray(args.args) ? `[${args.args.length} commands] ${args.args.join(" · ")}` : (args.args ?? "");
       return new Text(theme.fg("toolTitle", theme.bold("srcwalk ")) + theme.fg("accent", label), 0, 0);
     },
     renderResult(result: ToolResultLike, { isPartial }: { isPartial: boolean }, theme: ThemeLike) {
@@ -128,16 +131,16 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
   const piEvents = pi as unknown as { on(event: string, handler: (event: any) => any): void };
 
   piEvents.on("before_agent_start", async (event: { systemPrompt: string }) => {
-    const startIdx = event.systemPrompt.indexOf(SENTINEL_START);
-    const endIdx = event.systemPrompt.indexOf(SENTINEL_END);
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      return {
-        systemPrompt:
-          event.systemPrompt.slice(0, startIdx) +
-          event.systemPrompt.slice(endIdx + SENTINEL_END.length),
-      };
+    let prompt = event.systemPrompt;
+    // Remove every stale block (loop in case multiple legacy installs left
+    // more than one), leaving the rest of the prompt untouched.
+    while (true) {
+      const startIdx = prompt.indexOf(SENTINEL_START);
+      const endIdx = prompt.indexOf(SENTINEL_END);
+      if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) break;
+      prompt = prompt.slice(0, startIdx) + prompt.slice(endIdx + SENTINEL_END.length);
     }
-    return { systemPrompt: event.systemPrompt };
+    return { systemPrompt: prompt };
   });
 }
 

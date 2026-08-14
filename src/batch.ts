@@ -37,9 +37,10 @@ export function planBatch(args: string | string[]): BatchPlan {
   for (const raw of raws) {
     const meta = findShellMetachar(raw);
     if (meta !== undefined) {
+      const display = meta === "\n" ? "\\n" : meta === "\r" ? "\\r" : meta;
       return {
         error:
-          `Shell metacharacter '${meta}' in command "${raw}" is not supported — no shell. ` +
+          `Shell metacharacter '${display}' in command "${raw}" is not supported — no shell. ` +
           "Pass multiple commands as an array instead.",
       };
     }

@@ -4,7 +4,8 @@
  * Rules:
  * - Whitespace separates tokens.
  * - Single quotes preserve their content literally.
- * - Double quotes preserve content, with backslash escapes (`\"`, `\\`, `\n`...).
+ * - Double quotes preserve content; backslash is literal except before `"` and
+ *   `\\` (POSIX rule — so `"\\d+"` stays `\d+`, the common regex case).
  * - Backslash outside quotes escapes the next character.
  * - Unterminated quotes are rejected with a clear error instead of being
  *   silently swallowed.
@@ -23,8 +24,13 @@ export function splitArgs(input: string): string[] {
         quote = null;
         tokenStarted = true;
       } else if (ch === "\\" && quote === '"') {
-        i++;
-        if (i < input.length) current += input[i]!;
+        const next = input[i + 1];
+        if (next === '"' || next === "\\") {
+          i++;
+          current += input[i]!;
+        } else {
+          current += ch;
+        }
         tokenStarted = true;
       } else {
         current += ch;
@@ -81,7 +87,7 @@ export function findShellMetachar(input: string): string | undefined {
       i++;
       continue;
     }
-    if (ch === "|" || ch === ">" || ch === "<" || ch === ";" || ch === "&") return ch;
+    if (ch === "|" || ch === ">" || ch === "<" || ch === ";" || ch === "&" || ch === "\n" || ch === "\r") return ch;
   }
   return undefined;
 }

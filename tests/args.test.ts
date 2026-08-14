@@ -57,3 +57,19 @@ test("normalizeSrcwalkArgs: surfaces unterminated quote errors", () => {
   assert.ok("error" in result);
   assert.match(result.error, /Unterminated single quote/);
 });
+
+test("splitArgs: double-quote backslash is literal except before quote/backslash (POSIX)", () => {
+  // "\\d+" stays \d+ — the common regex case
+  assert.deepEqual(splitArgs('discover "\\d+" --as text'), ["discover", "\\d+", "--as", "text"]);
+  // backslash before a plain char is literal
+  assert.deepEqual(splitArgs('a "b\\c" d'), ["a", "b\\c", "d"]);
+  // \" still escapes to a double quote
+  assert.deepEqual(splitArgs('a "b\\"c" d'), ["a", 'b"c', "d"]);
+  // \\ still escapes to a single backslash
+  assert.deepEqual(splitArgs('a "b\\\\c" d'), ["a", "b\\c", "d"]);
+});
+
+test("splitArgs: quoted newlines are preserved", () => {
+  assert.deepEqual(splitArgs('"a\nb"'), ["a\nb"]);
+  assert.deepEqual(splitArgs("'a\nb'"), ["a\nb"]);
+});

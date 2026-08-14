@@ -68,3 +68,10 @@ test("runBatch: a failing command mid-batch does not stop the others", { timeout
   assert.notEqual(batch.results[1]!.result.exitCode, 0);
   assert.equal(batch.results[2]!.result.exitCode, 0);
 });
+
+test("planBatch: rejects unquoted newlines instead of merging commands", () => {
+  const plan = planBatch("context foo\ntrace callers bar");
+  assert.ok("error" in plan);
+  assert.match(plan.error, /no shell/);
+  assert.match(plan.error, /array instead/);
+});
