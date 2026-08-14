@@ -27,7 +27,7 @@ srcwalk({ args: "context executeSearch --scope src" })
 
 - `args` is the full command line (do **not** prefix it with `srcwalk`).
 - Runs with the open repo as cwd (`--scope .` resolves there).
-- Output is returned verbatim (stdout + stderr). `srcwalk` self-bounds output via `--budget` (default 6000 tokens); add `--no-budget` only when full output is truly needed. A hard 50KB tool-side cap still applies as a safety net.
+- Output is returned verbatim (stdout + stderr). `srcwalk` self-bounds output via `--budget` (default 6000 tokens); add `--no-budget` only when full output is truly needed.
 - Non-zero exits are prefixed with `[srcwalk exit N]`; a missing binary returns install instructions.
 
 ## Install
@@ -75,7 +75,7 @@ pi-srcwalk/
 
 1. **Raw passthrough, not a semantic layer** — the agent talks to the CLI directly; the extension adds no heuristics to maintain.
 2. **Verbatim evidence** — return the CLI's own output, not a paraphrase.
-3. **Self-bounded by default** — rely on `srcwalk`'s `--budget`; keep a hard tool-side cap only as a safety net.
+3. **Self-bounded by default** — `srcwalk`'s own `--budget` governs output size; the tool passes everything through untouched.
 4. **Zero runtime deps** — pure TypeScript, no Python, no database, no native modules.
 
 ## License

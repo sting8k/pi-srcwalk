@@ -12,11 +12,6 @@ import { runSrcwalk } from "../../src/runner.js";
 const SENTINEL_START = "<!-- pi-srcwalk:tools-rules:start -->";
 const SENTINEL_END = "<!-- pi-srcwalk:tools-rules:end -->";
 
-// Hard cap on returned tool output. srcwalk self-bounds via --budget
-// (default 6000 tokens), but a raw passthrough lets the agent pass
-// --no-budget or a huge --budget, so the tool enforces its own ceiling.
-const MAX_OUTPUT_BYTES = 50 * 1024;
-
 const SrcwalkParams = Type.Object({
   args: Type.String({
     description:
@@ -29,23 +24,7 @@ interface SrcwalkDetails {
   command: string;
   exitCode: number;
   elapsedMs: number;
-  truncated: boolean;
   binaryNotFound: boolean;
-}
-
-/** Truncate at a UTF-8-safe byte boundary, never splitting a multi-byte char. */
-function truncateUtf8Bytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return { text, truncated: false };
-
-  let cut = maxBytes;
-  while (cut > 0 && (buf[cut]! & 0b11000000) === 0b10000000) cut--;
-  if (cut > 0) {
-    const lead = buf[cut - 1]!;
-    const seqLen = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-    if (cut - 1 + seqLen > maxBytes) cut--;
-  }
-  return { text: buf.subarray(0, cut).toString("utf8"), truncated: true };
 }
 
 export default function piSrcwalkExtension(pi: ExtensionAPI) {
@@ -74,7 +53,7 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
       if ("error" in normalized) {
         return {
           content: [{ type: "text", text: `[srcwalk] ${normalized.error}` }],
-          details: { command: params.args, exitCode: 0, elapsedMs: 0, truncated: false, binaryNotFound: false } satisfies SrcwalkDetails,
+          details: { command: params.args, exitCode: 0, elapsedMs: 0, binaryNotFound: false } satisfies SrcwalkDetails,
         };
       }
 
@@ -87,19 +66,13 @@ export default function piSrcwalkExtension(pi: ExtensionAPI) {
         text = `[srcwalk exit ${result.exitCode}]\n${text}`;
       }
 
-      const bounded = truncateUtf8Bytes(text, MAX_OUTPUT_BYTES);
-      if (bounded.truncated) {
-        bounded.text = `${bounded.text}\n\n[output truncated at 50KB — narrow scope or lower --budget]`;
-      }
-
       const details: SrcwalkDetails = {
         command: params.args,
         exitCode: result.exitCode,
         elapsedMs: result.elapsedMs,
-        truncated: bounded.truncated,
         binaryNotFound: result.binaryNotFound,
       };
-      return { content: [{ type: "text", text: bounded.text }], details };
+      return { content: [{ type: "text", text }], details };
     },
     renderCall(args: { args?: string }, theme: ThemeLike) {
       return new Text(theme.fg("toolTitle", theme.bold("srcwalk ")) + theme.fg("accent", args.args ?? ""), 0, 0);

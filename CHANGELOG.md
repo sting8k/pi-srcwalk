@@ -10,7 +10,6 @@ All notable changes to this project are documented here.
 - Removed the `semantic_*` contract injection into the system prompt; the extension now only cleans up the stale sentinel block from older installs.
 
 ### Added
-- Hard 50KB tool-side output cap as a safety net against `--no-budget` abuse, with an explicit truncation notice.
 - Missing-binary detection with actionable install instructions, and `[srcwalk exit N]` prefixes on non-zero exits.
 
 ## [1.2.8] - 2026-07-22
