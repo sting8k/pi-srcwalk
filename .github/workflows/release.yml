@@ -70,7 +70,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.npm-version.outputs.exists != 'true'
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Security audit
         if: steps.npm-version.outputs.exists != 'true'
