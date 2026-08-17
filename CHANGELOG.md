@@ -2,11 +2,11 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased] — raw srcwalk passthrough
+## [2.0.0] - 2026-08-17
 
 ### Changed
 - Replaced the five `semantic_*` tools with a single raw `srcwalk` passthrough tool: `args: string` is split quote-aware and passed straight to the CLI, with output returned verbatim.
-- Removed the semantic engine entirely (BM25/PRF cache, router, ranking, grep pipeline, output formatting); the extension now depends only on a tiny runner + arg splitter.
+- Removed the semantic engine entirely (BM25/PRF cache, router, ranking, grep pipeline, output formatting); the extension now depends only on a small runner, batch coordinator, and argument splitter.
 - Removed the `semantic_*` contract injection into the system prompt; the extension now only cleans up the stale sentinel block from older installs.
 
 ### Added

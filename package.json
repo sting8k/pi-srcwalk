@@ -1,7 +1,7 @@
 {
   "name": "@sting8k/pi-srcwalk",
-  "version": "1.2.8",
-  "description": "Makes structural code-intelligence easy for AI coding agents",
+  "version": "2.0.0",
+  "description": "A thin Pi tool that runs the srcwalk CLI directly for structural code intelligence",
   "type": "module",
   "main": "extensions/pi-srcwalk/index.ts",
   "keywords": [
@@ -9,8 +9,8 @@
     "pi-extension",
     "srcwalk",
     "code-intelligence",
-    "semantic-query",
-    "semantic-grep"
+    "cli",
+    "passthrough"
   ],
   "repository": {
     "type": "git",
